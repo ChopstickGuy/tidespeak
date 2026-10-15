@@ -1,0 +1,4 @@
+*.obj
+*.exe
+asmspeak.ini
+server_schluessel.bin
