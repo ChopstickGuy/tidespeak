@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/proto", "crates/server", "crates/client"]
+
+[workspace.package]
+version = "3.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/ChopstickGuy/asmspeak"
+
+[workspace.dependencies]
+tidespeak-proto = { path = "crates/proto" }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+bytes = "1"
+sha2 = "0.10"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Audio-Code auch im Debug-Build schnell genug
+[profile.dev.package."*"]
+opt-level = 2

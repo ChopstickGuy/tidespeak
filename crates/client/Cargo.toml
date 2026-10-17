@@ -1,0 +1,36 @@
+[package]
+name = "tidespeak"
+description = "Tidespeak – leichter, verschlüsselter Sprach- und Textchat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "tidespeak"
+
+[dependencies]
+tidespeak-proto.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+serde.workspace = true
+bytes.workspace = true
+log.workspace = true
+env_logger.workspace = true
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "software-renderer-systemfonts", "unstable-winit-030"] }
+cpal = "0.18"
+opus = "0.4"
+nnnoiseless = { version = "0.5", default-features = false }
+rtrb = "0.3"
+directories = "6"
+toml = "0.9"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# PipeWire/PulseAudio direkt (reiner Rust-Client), ALSA als Rückfall
+cpal = { version = "0.18", features = ["pulseaudio"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+
+[build-dependencies]
+slint-build = "1.18"
+winresource = "0.1"

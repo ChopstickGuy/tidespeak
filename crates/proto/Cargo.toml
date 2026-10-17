@@ -1,0 +1,12 @@
+[package]
+name = "tidespeak-proto"
+description = "Tidespeak network protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+postcard.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["io-util"] }

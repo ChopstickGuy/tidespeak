@@ -1,4 +1,3 @@
-*.obj
-*.exe
-asmspeak.ini
-server_schluessel.bin
+/target
+*.der
+tidespeak-data/

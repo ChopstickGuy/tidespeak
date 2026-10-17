@@ -1,0 +1,968 @@
+// Tidespeak – Hauptfenster
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Icon, Button, RoundButton, Entry, Switch, Radio, Slider, LevelMeter, Avatar, Badge, BoxedList, Row, GroupTitle, CornerMask } from "widgets.slint";
+
+import "../assets/fonts/Inter-Regular.ttf";
+import "../assets/fonts/Inter-Medium.ttf";
+import "../assets/fonts/Inter-SemiBold.ttf";
+import "../assets/fonts/Inter-Bold.ttf";
+
+export struct UserItem {
+    id: int,
+    name: string,
+    initial: string,
+    color: color,
+    speaking: bool,
+    muted: bool,
+    deafened: bool,
+    me: bool,
+}
+
+export struct ChannelItem {
+    id: int,
+    name: string,
+    current: bool,
+    users: [UserItem],
+}
+
+export struct MessageItem {
+    author: string,
+    initial: string,
+    color: color,
+    time: string,
+    text: string,
+    system: bool,
+    grouped: bool,
+}
+
+export struct RecentItem {
+    address: string,
+    subtitle: string,
+}
+
+export struct DeviceItem {
+    name: string,
+    selected: bool,
+}
+
+component SidebarItem inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> selected;
+    in property <string> suffix;
+    callback clicked();
+    height: 38px;
+    border-radius: Theme.radius-small;
+    background: selected ? Theme.sidebar-selected : ta.has-hover ? Theme.sidebar-hover : transparent;
+    animate background { duration: 100ms; }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            Icon { source: root.icon; width: 17px; height: 17px; }
+        }
+        Text {
+            text: root.text;
+            color: Theme.text;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+            font-weight: root.selected ? 600 : 400;
+        }
+        if root.suffix != "": Text {
+            text: root.suffix;
+            color: Theme.text-dim;
+            font-size: Theme.font-small;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component UserRow inherits Rectangle {
+    in property <UserItem> user;
+    height: 32px;
+    HorizontalLayout {
+        padding-left: 34px;
+        padding-right: 10px;
+        spacing: 9px;
+        VerticalLayout {
+            alignment: center;
+            Avatar {
+                size: 24px;
+                initial: root.user.initial;
+                fill: root.user.color;
+                speaking: root.user.speaking;
+            }
+        }
+        Text {
+            text: root.user.name + (root.user.me ? "  (du)" : "");
+            color: root.user.speaking ? Theme.text : Theme.text-dim;
+            font-weight: root.user.speaking ? 600 : 400;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if root.user.muted && !root.user.deafened: VerticalLayout {
+            alignment: center;
+            Icon { source: @image-url("../assets/icons/mic-off.svg"); width: 14px; height: 14px; tint: Theme.error; }
+        }
+        if root.user.deafened: VerticalLayout {
+            alignment: center;
+            Icon { source: @image-url("../assets/icons/headphone-off.svg"); width: 14px; height: 14px; tint: Theme.error; }
+        }
+    }
+}
+
+component MessageView inherits VerticalLayout {
+    in property <MessageItem> msg;
+    padding-left: 24px;
+    padding-right: 24px;
+    padding-top: msg.system ? 10px : msg.grouped ? 1px : 12px;
+    padding-bottom: msg.system ? 6px : 1px;
+
+    if root.msg.system: Text {
+        text: root.msg.text;
+        color: Theme.text-dim;
+        font-size: Theme.font-small;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+    if !root.msg.system: HorizontalLayout {
+        spacing: 12px;
+        VerticalLayout {
+            width: 36px;
+            alignment: start;
+            if !root.msg.grouped: Avatar {
+                size: 36px;
+                initial: root.msg.initial;
+                fill: root.msg.color;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            if !root.msg.grouped: HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text {
+                    text: root.msg.author;
+                    font-weight: 700;
+                    color: root.msg.color.brighter(0.35);
+                }
+                Text {
+                    text: root.msg.time;
+                    font-size: Theme.font-small;
+                    color: Theme.text-faint;
+                    vertical-alignment: center;
+                }
+            }
+            TextInput {
+                text: root.msg.text;
+                read-only: true;
+                wrap: word-wrap;
+                single-line: false;
+                color: #ffffffe6;
+                selection-background-color: Theme.accent.transparentize(0.4);
+                selection-foreground-color: Theme.text;
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Tidespeak";
+    icon: @image-url("../assets/tidespeak.svg");
+    preferred-width: 1120px;
+    preferred-height: 720px;
+    min-width: 860px;
+    min-height: 540px;
+    no-frame: true;
+    background: Theme.window;
+    default-font-family: "Inter";
+    default-font-size: Theme.font;
+
+    // 0 = Verbinden, 1 = Chat, 2 = Einstellungen
+    in-out property <int> page: 0;
+    // 0 = getrennt, 1 = verbinde, 2 = verbunden
+    in property <int> conn-state: 0;
+    in property <bool> is-maximized: false;
+    in property <string> server-name;
+    in property <string> server-address;
+    in property <string> fingerprint;
+    in property <string> error-text;
+    in property <bool> key-changed: false;
+    in property <string> key-old;
+    in property <string> key-new;
+    in property <[ChannelItem]> channels;
+    in property <[MessageItem]> messages;
+    in property <string> channel-name;
+    in property <int> online-count;
+    in property <[RecentItem]> recents;
+    in-out property <string> address;
+    in-out property <string> nick;
+    in property <string> me-initial;
+    in property <color> me-color;
+    in-out property <bool> muted;
+    in-out property <bool> deafened;
+    in property <bool> transmitting;
+    in property <string> version;
+
+    // Einstellungen
+    in property <[DeviceItem]> input-devices;
+    in property <[DeviceItem]> output-devices;
+    in property <string> input-error;
+    in property <string> output-error;
+    in-out property <float> input-gain;
+    in-out property <float> output-volume;
+    in-out property <float> threshold;
+    in-out property <int> voice-mode;
+    in-out property <bool> noise-suppression;
+    in-out property <bool> mic-test;
+    in property <float> level;
+    in property <string> ptt-key-name;
+    in property <[string]> ptt-keys;
+    in-out property <int> ptt-key-index;
+    in-out property <int> quality-index;
+
+    property <bool> stick-bottom: true;
+
+    callback connect();
+    callback cancel();
+    callback disconnect();
+    callback trust-new-key();
+    callback forget-error();
+    callback connect-recent(string);
+    callback join-channel(int);
+    callback send-chat(string);
+    callback toggle-mute();
+    callback toggle-deafen();
+    callback select-input(int);
+    callback select-output(int);
+    callback settings-changed();
+    callback refresh-devices();
+    callback key-event(string, bool) -> bool;
+    callback start-drag();
+    callback start-resize(int);
+    callback toggle-maximize();
+    callback minimize();
+    callback close-window();
+
+    fs := FocusScope {
+        key-pressed(e) => {
+            if (root.key-event(e.text, true)) { return accept; }
+            return reject;
+        }
+        key-released(e) => {
+            if (root.key-event(e.text, false)) { return accept; }
+            return reject;
+        }
+
+        HorizontalLayout {
+            // ─────────────────────────────────────────── Seitenleiste
+            Rectangle {
+                width: 272px;
+                background: Theme.sidebar;
+                VerticalLayout {
+                    // Kopf (zum Verschieben)
+                    Rectangle {
+                        height: 50px;
+                        TouchArea {
+                            pointer-event(e) => {
+                                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.start-drag(); }
+                            }
+                            double-clicked => { root.toggle-maximize(); }
+                        }
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            VerticalLayout {
+                                alignment: center;
+                                Image { source: @image-url("../assets/tidespeak.svg"); width: 20px; height: 20px; }
+                            }
+                            Text { color: Theme.text; text: "Tidespeak"; font-weight: 700; vertical-alignment: center; }
+                        }
+                    }
+
+                    if root.conn-state == 2: VerticalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        padding-bottom: 8px;
+                        // Server-Karte
+                        Rectangle {
+                            Rectangle { background: @linear-gradient(120deg, #22d3ee30 0%, #a855f730 100%); }
+                            CornerMask { x: -10px; y: -10px; width: parent.width + 20px; height: parent.height + 20px; outside: Theme.sidebar; radius: Theme.radius; }
+                            HorizontalLayout {
+                                padding: 12px;
+                                spacing: 10px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Icon { source: @image-url("../assets/icons/shield-check.svg"); tint: Theme.teal; width: 20px; height: 20px; }
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 1px;
+                                    Text { color: Theme.text; text: root.server-name; font-weight: 700; overflow: elide; }
+                                    Text { text: root.online-count + " online · verschlüsselt"; font-size: Theme.font-small; color: Theme.text-dim; }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.conn-state != 2: VerticalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 2px;
+                        SidebarItem {
+                            text: "Verbinden";
+                            icon: @image-url("../assets/icons/server.svg");
+                            selected: root.page == 0;
+                            clicked => { root.page = 0; }
+                        }
+                        SidebarItem {
+                            text: "Einstellungen";
+                            icon: @image-url("../assets/icons/settings.svg");
+                            selected: root.page == 2;
+                            clicked => { root.page = 2; root.refresh-devices(); }
+                        }
+                    }
+
+                    // Kanäle mit Teilnehmern
+                    ScrollView {
+                        vertical-stretch: 1;
+                        visible: root.conn-state == 2;
+                        VerticalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            padding-top: 4px;
+                            spacing: 2px;
+                            alignment: start;
+                            Text {
+                                text: "KANÄLE";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: Theme.text-faint;
+                                letter-spacing: 0.6px;
+                            }
+                            Rectangle { height: 4px; }
+                            for ch in root.channels: VerticalLayout {
+                                SidebarItem {
+                                    text: ch.name;
+                                    icon: @image-url("../assets/icons/volume-2.svg");
+                                    selected: ch.current && root.page == 1;
+                                    suffix: ch.users.length > 0 ? ch.users.length : "";
+                                    clicked => {
+                                        root.page = 1;
+                                        root.join-channel(ch.id);
+                                    }
+                                }
+                                for u in ch.users: UserRow { user: u; }
+                            }
+                        }
+                    }
+                    if root.conn-state != 2: Rectangle { vertical-stretch: 1; }
+
+                    // Eigener Bereich unten
+                    Rectangle {
+                        height: 62px;
+                        background: Theme.panel;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 10px;
+                            spacing: 6px;
+                            VerticalLayout {
+                                alignment: center;
+                                Avatar {
+                                    size: 36px;
+                                    initial: root.me-initial;
+                                    fill: root.me-color;
+                                    speaking: root.transmitting;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                spacing: 1px;
+                                Text { color: Theme.text; text: root.nick; font-weight: 600; overflow: elide; }
+                                Text {
+                                    text: root.conn-state == 2 ? (root.transmitting ? "Sendet …" : root.deafened ? "Ton aus" : root.muted ? "Stumm" : "Verbunden")
+                                        : root.conn-state == 1 ? "Verbinde …" : "Nicht verbunden";
+                                    font-size: Theme.font-small;
+                                    overflow: elide;
+                                    color: root.conn-state == 2 && root.transmitting ? Theme.teal
+                                        : root.conn-state == 2 ? Theme.success : Theme.text-dim;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                RoundButton {
+                                    size: 30px;
+                                    icon-size: 15px;
+                                    icon: root.muted ? @image-url("../assets/icons/mic-off.svg") : @image-url("../assets/icons/mic.svg");
+                                    active: root.muted;
+                                    clicked => { root.toggle-mute(); }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                RoundButton {
+                                    size: 30px;
+                                    icon-size: 15px;
+                                    icon: root.deafened ? @image-url("../assets/icons/headphone-off.svg") : @image-url("../assets/icons/headphones.svg");
+                                    active: root.deafened;
+                                    clicked => { root.toggle-deafen(); }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                RoundButton {
+                                    size: 30px;
+                                    icon-size: 15px;
+                                    icon: @image-url("../assets/icons/settings.svg");
+                                    active: root.page == 2;
+                                    active-color: Theme.accent;
+                                    clicked => {
+                                        if (root.page == 2) {
+                                            root.page = root.conn-state == 2 ? 1 : 0;
+                                        } else {
+                                            root.page = 2;
+                                            root.refresh-devices();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ─────────────────────────────────────────── Inhalt
+            VerticalLayout {
+                horizontal-stretch: 1;
+
+                // Kopfleiste
+                Rectangle {
+                    height: 50px;
+                    TouchArea {
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.start-drag(); }
+                        }
+                        double-clicked => { root.toggle-maximize(); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 24px;
+                        padding-right: 12px;
+                        spacing: 10px;
+                        if root.page == 1: VerticalLayout {
+                            alignment: center;
+                            Icon { source: @image-url("../assets/icons/hash.svg"); tint: Theme.text-dim; }
+                        }
+                        Text { color: Theme.text;
+                            text: root.page == 1 ? root.channel-name : root.page == 2 ? "Einstellungen" : "";
+                            font-weight: 700;
+                            font-size: Theme.font-title;
+                            vertical-alignment: center;
+                        }
+                        if root.page == 1: VerticalLayout {
+                            alignment: center;
+                            Badge { text: "verschlüsselt"; tone: Theme.teal; }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        if root.conn-state == 2: VerticalLayout {
+                            alignment: center;
+                            Button {
+                                flat: true;
+                                text: "Trennen";
+                                has-icon: true;
+                                icon: @image-url("../assets/icons/log-out.svg");
+                                clicked => { root.disconnect(); }
+                            }
+                        }
+                        Rectangle { width: 6px; }
+                        VerticalLayout {
+                            alignment: center;
+                            RoundButton { icon: @image-url("../assets/icons/minus.svg"); clicked => { root.minimize(); } }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            RoundButton { icon: @image-url("../assets/icons/square.svg"); icon-size: 11px; clicked => { root.toggle-maximize(); } }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            RoundButton { icon: @image-url("../assets/icons/x.svg"); clicked => { root.close-window(); } }
+                        }
+                    }
+                }
+
+                // ─────────── Seite: Verbinden
+                if root.page == 0: ScrollView {
+                    vertical-stretch: 1;
+                    content-width: self.visible-width;
+                    HorizontalLayout {
+                        alignment: center;
+                        padding-bottom: 32px;
+                        VerticalLayout {
+                            width: min(640px, root.width - 272px - 64px);
+                            alignment: start;
+                            spacing: 22px;
+                            padding-top: 12px;
+
+                            Rectangle {
+                                Rectangle { background: @linear-gradient(120deg, #22d3ee38 0%, #a855f738 100%); }
+                                CornerMask { x: -10px; y: -10px; width: parent.width + 20px; height: parent.height + 20px; outside: Theme.window; radius: 18px; }
+                                VerticalLayout {
+                                    padding: 32px;
+                                    spacing: 8px;
+                                    alignment: start;
+                                    Text { color: Theme.text; text: "Willkommen bei Tidespeak"; font-size: 26px; font-weight: 700; }
+                                    Text {
+                                        text: "Sprach- und Textchat für dich und deine Leute – verschlüsselt, ohne Konto, ohne Werbung.";
+                                        color: #ffffffcc;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                GroupTitle { title: "Verbindung"; description: "Adresse des Servers – im Heimnetz die IP des Server-PCs, sonst ein Hostname."; }
+                                BoxedList {
+                                    Row {
+                                        title: "Server";
+                                        has-icon: true;
+                                        icon: @image-url("../assets/icons/server.svg");
+                                        addr := Entry {
+                                            width: 300px;
+                                            text <=> root.address;
+                                            placeholder: "z. B. 192.168.1.20 oder voice.example.org";
+                                            enabled: root.conn-state == 0;
+                                            accepted => { root.connect(); }
+                                        }
+                                    }
+                                    Row {
+                                        title: "Dein Name";
+                                        has-icon: true;
+                                        icon: @image-url("../assets/icons/user-round.svg");
+                                        separator: false;
+                                        Entry {
+                                            width: 300px;
+                                            text <=> root.nick;
+                                            placeholder: "Wie sollen dich andere sehen?";
+                                            enabled: root.conn-state == 0;
+                                            accepted => { root.connect(); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.key-changed: Rectangle {
+                                border-radius: Theme.radius;
+                                background: #c01c2833;
+                                border-width: 1px;
+                                border-color: #ff7b6355;
+                                VerticalLayout {
+                                    padding: 18px;
+                                    spacing: 10px;
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        Icon { source: @image-url("../assets/icons/shield-alert.svg"); tint: Theme.error; width: 22px; height: 22px; }
+                                        Text { color: Theme.text; text: "Die Identität dieses Servers hat sich geändert"; font-weight: 700; vertical-alignment: center; }
+                                    }
+                                    Text {
+                                        wrap: word-wrap;
+                                        color: #ffffffcc;
+                                        text: "Das passiert, wenn der Server neu aufgesetzt wurde – oder wenn sich jemand dazwischenschaltet. Frag beim Betreiber nach, ob der neue Fingerabdruck stimmt.";
+                                    }
+                                    Text { text: "Bisher:  " + root.key-old; font-family: "monospace"; font-size: Theme.font-small; color: Theme.text-dim; }
+                                    Text { text: "Jetzt:    " + root.key-new; font-family: "monospace"; font-size: Theme.font-small; color: Theme.error; }
+                                    HorizontalLayout {
+                                        alignment: end;
+                                        spacing: 8px;
+                                        Button { text: "Abbrechen"; clicked => { root.forget-error(); } }
+                                        Button { text: "Neuem Schlüssel vertrauen"; destructive: true; clicked => { root.trust-new-key(); } }
+                                    }
+                                }
+                            }
+
+                            if root.error-text != "" && !root.key-changed: Rectangle {
+                                border-radius: Theme.radius;
+                                background: #ff7b631f;
+                                HorizontalLayout {
+                                    padding: 14px;
+                                    spacing: 10px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Icon { source: @image-url("../assets/icons/circle-alert.svg"); tint: Theme.error; }
+                                    }
+                                    Text { color: Theme.text; text: root.error-text; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                alignment: end;
+                                spacing: 8px;
+                                if root.conn-state == 1: Button { text: "Abbrechen"; clicked => { root.cancel(); } }
+                                Button {
+                                    text: root.conn-state == 1 ? "Verbinde …" : "Verbinden";
+                                    primary: true;
+                                    enabled: root.conn-state == 0;
+                                    min-width: 140px;
+                                    clicked => { root.connect(); }
+                                }
+                            }
+
+                            if root.recents.length > 0: VerticalLayout {
+                                GroupTitle { title: "Zuletzt verbunden"; }
+                                BoxedList {
+                                    for r[i] in root.recents: Row {
+                                        title: r.address;
+                                        subtitle: r.subtitle;
+                                        has-icon: true;
+                                        icon: @image-url("../assets/icons/radio-tower.svg");
+                                        activatable: root.conn-state == 0;
+                                        separator: i < root.recents.length - 1;
+                                        activated => { root.connect-recent(r.address); }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Icon { source: @image-url("../assets/icons/arrow-left.svg"); tint: Theme.text-faint; transform-rotation: 180deg; width: 16px; height: 16px; }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: "Tidespeak " + root.version + " · QUIC + TLS 1.3 · Opus · RNNoise";
+                                color: Theme.text-faint;
+                                font-size: Theme.font-small;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // ─────────── Seite: Chat
+                if root.page == 1: VerticalLayout {
+                    vertical-stretch: 1;
+                    chat := ScrollView {
+                        vertical-stretch: 1;
+                        content-width: self.visible-width;
+                        changed content-height => {
+                            if (root.stick-bottom) {
+                                self.content-y = min(0px, self.visible-height - self.content-height);
+                            }
+                        }
+                        scrolled => {
+                            root.stick-bottom = self.content-y <= self.visible-height - self.content-height + 40px;
+                        }
+                        VerticalLayout {
+                            padding-bottom: 12px;
+                            alignment: end;
+                            if root.messages.length == 0: Text {
+                                text: "Noch keine Nachrichten in " + root.channel-name + " – schreib die erste!";
+                                color: Theme.text-faint;
+                                horizontal-alignment: center;
+                            }
+                            for m in root.messages: MessageView { msg: m; }
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        padding-bottom: 18px;
+                        padding-top: 4px;
+                        Rectangle {
+                            height: 46px;
+                            border-radius: Theme.radius;
+                            background: Theme.entry;
+                            border-width: composer.has-focus ? 2px : 0px;
+                            border-color: Theme.accent.transparentize(0.4);
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                padding-right: 6px;
+                                spacing: 4px;
+                                composer := Entry {
+                                    height: 44px;
+                                    background: transparent;
+                                    border-width: 0px;
+                                    horizontal-stretch: 1;
+                                    placeholder: "Nachricht an " + root.channel-name;
+                                    accepted(t) => {
+                                        root.stick-bottom = true;
+                                        root.send-chat(t);
+                                        self.text = "";
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    RoundButton {
+                                        size: 34px;
+                                        icon-size: 16px;
+                                        icon: @image-url("../assets/icons/send-horizontal.svg");
+                                        tint: composer.text == "" ? Theme.text-faint : Theme.accent-hover;
+                                        clicked => {
+                                            root.stick-bottom = true;
+                                            root.send-chat(composer.text);
+                                            composer.text = "";
+                                            composer.focus-input();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ─────────── Seite: Einstellungen
+                if root.page == 2: ScrollView {
+                    vertical-stretch: 1;
+                    content-width: self.visible-width;
+                    HorizontalLayout {
+                        alignment: center;
+                        padding-bottom: 32px;
+                        VerticalLayout {
+                            width: min(600px, root.width - 272px - 64px);
+                            alignment: start;
+                            spacing: 24px;
+                            padding-top: 8px;
+
+                            VerticalLayout {
+                                GroupTitle { title: "Ausgabe"; description: "Wo du die anderen hörst – Kopfhörer, Headset oder Lautsprecher."; }
+                                BoxedList {
+                                    for d[i] in root.output-devices: Row {
+                                        title: d.name;
+                                        has-icon: true;
+                                        icon: @image-url("../assets/icons/headphones.svg");
+                                        activatable: true;
+                                        activated => { root.select-output(i); }
+                                        VerticalLayout { alignment: center; Radio { checked: d.selected; } }
+                                    }
+                                    if root.output-error != "": Row { title: root.output-error; dimmed: true; has-icon: true; icon: @image-url("../assets/icons/circle-alert.svg"); }
+                                    Row {
+                                        title: "Lautstärke";
+                                        separator: false;
+                                        Slider {
+                                            width: 300px;
+                                            value <=> root.output-volume;
+                                            released => { root.settings-changed(); }
+                                        }
+                                        Text { text: Math.round(root.output-volume * 200) + " %"; width: 44px; color: Theme.text-dim; vertical-alignment: center; horizontal-alignment: right; }
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                GroupTitle { title: "Mikrofon"; }
+                                BoxedList {
+                                    for d[i] in root.input-devices: Row {
+                                        title: d.name;
+                                        has-icon: true;
+                                        icon: @image-url("../assets/icons/mic.svg");
+                                        activatable: true;
+                                        activated => { root.select-input(i); }
+                                        VerticalLayout { alignment: center; Radio { checked: d.selected; } }
+                                    }
+                                    if root.input-error != "": Row { title: root.input-error; dimmed: true; has-icon: true; icon: @image-url("../assets/icons/circle-alert.svg"); }
+                                    Row {
+                                        title: "Verstärkung";
+                                        Slider {
+                                            width: 300px;
+                                            value <=> root.input-gain;
+                                            released => { root.settings-changed(); }
+                                        }
+                                        Text { text: Math.round(root.input-gain * 400) + " %"; width: 44px; color: Theme.text-dim; vertical-alignment: center; horizontal-alignment: right; }
+                                    }
+                                    Row {
+                                        title: "Mikrofon testen";
+                                        subtitle: "Du hörst dich selbst – so klingst du für andere.";
+                                        separator: false;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            LevelMeter { width: 160px; level: root.level; active: root.transmitting || root.mic-test; }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Switch { checked <=> root.mic-test; toggled => { root.settings-changed(); } }
+                                        }
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                GroupTitle { title: "Sprachübertragung"; description: "Wann dein Mikrofon an die anderen gesendet wird."; }
+                                BoxedList {
+                                    Row {
+                                        title: "Sprachaktivierung";
+                                        subtitle: "Sendet automatisch, sobald du sprichst.";
+                                        activatable: true;
+                                        activated => { root.voice-mode = 0; root.settings-changed(); }
+                                        VerticalLayout { alignment: center; Radio { checked: root.voice-mode == 0; } }
+                                    }
+                                    if root.voice-mode == 0: Row {
+                                        title: "Empfindlichkeit";
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: 6px;
+                                            Slider {
+                                                width: 300px;
+                                                value <=> root.threshold;
+                                                released => { root.settings-changed(); }
+                                            }
+                                            LevelMeter { width: 300px; level: root.level; threshold: root.threshold; active: root.transmitting; }
+                                        }
+                                    }
+                                    Row {
+                                        title: "Push-to-Talk";
+                                        subtitle: "Sendet nur, solange " + root.ptt-key-name + " gedrückt ist.";
+                                        activatable: true;
+                                        activated => { root.voice-mode = 1; root.settings-changed(); }
+                                        VerticalLayout { alignment: center; Radio { checked: root.voice-mode == 1; } }
+                                    }
+                                    if root.voice-mode == 1: Row {
+                                        title: "Taste";
+                                        subtitle: "Unter Windows systemweit, unter Linux solange Tidespeak im Vordergrund ist.";
+                                        HorizontalLayout {
+                                            spacing: 4px;
+                                            for k[i] in root.ptt-keys: Rectangle {
+                                                width: 38px;
+                                                height: 30px;
+                                                border-radius: 6px;
+                                                background: root.ptt-key-index == i ? Theme.accent : kta.has-hover ? #ffffff21 : #ffffff12;
+                                                kta := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => { root.ptt-key-index = i; root.settings-changed(); }
+                                                }
+                                                Text { color: Theme.text; text: k; font-size: Theme.font-small; font-weight: 600; }
+                                            }
+                                        }
+                                    }
+                                    Row {
+                                        title: "Dauerhaft senden";
+                                        subtitle: "Offenes Mikrofon – am besten mit Headset.";
+                                        separator: false;
+                                        activatable: true;
+                                        activated => { root.voice-mode = 2; root.settings-changed(); }
+                                        VerticalLayout { alignment: center; Radio { checked: root.voice-mode == 2; } }
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                GroupTitle { title: "Klang"; }
+                                BoxedList {
+                                    Row {
+                                        title: "Hintergrundgeräusche entfernen";
+                                        subtitle: "Filtert Tastatur, Lüfter und Rauschen aus deinem Mikrofon (RNNoise, läuft lokal).";
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Switch { checked <=> root.noise-suppression; toggled => { root.settings-changed(); } }
+                                        }
+                                    }
+                                    Row {
+                                        title: "Sprachqualität";
+                                        subtitle: "Höhere Qualität braucht etwas mehr Bandbreite.";
+                                        separator: false;
+                                        HorizontalLayout {
+                                            spacing: 4px;
+                                            for q[i] in ["Sparsam", "Standard", "Hoch"]: Rectangle {
+                                                width: 82px;
+                                                height: 30px;
+                                                border-radius: 6px;
+                                                background: root.quality-index == i ? Theme.accent : qta.has-hover ? #ffffff21 : #ffffff12;
+                                                qta := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => { root.quality-index = i; root.settings-changed(); }
+                                                }
+                                                Text { color: Theme.text; text: q; font-size: Theme.font-small; font-weight: 600; }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.fingerprint != "": VerticalLayout {
+                                GroupTitle { title: "Sicherheit"; description: "Vergleiche den Fingerabdruck mit der Anzeige des Servers – stimmen sie überein, bist du wirklich mit ihm verbunden."; }
+                                BoxedList {
+                                    HorizontalLayout {
+                                        padding: 14px;
+                                        spacing: 12px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Icon { source: @image-url("../assets/icons/shield-check.svg"); tint: Theme.teal; }
+                                        }
+                                        VerticalLayout {
+                                            spacing: 4px;
+                                            horizontal-stretch: 1;
+                                            Text { color: Theme.text; text: root.server-address; }
+                                            TextInput {
+                                                text: root.fingerprint;
+                                                read-only: true;
+                                                font-family: "monospace";
+                                                font-size: 13px;
+                                                color: Theme.teal;
+                                                selection-background-color: Theme.accent.transparentize(0.4);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Rahmen und Größenänderung (eigene Fensterdekoration)
+    if !root.is-maximized: Rectangle {
+        border-width: 1px;
+        border-color: Theme.border;
+    }
+    if !root.is-maximized: TouchArea {
+        x: 0; y: 6px; width: 5px; height: parent.height - 12px;
+        mouse-cursor: ew-resize;
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(6); } }
+    }
+    if !root.is-maximized: TouchArea {
+        x: parent.width - 5px; y: 6px; width: 5px; height: parent.height - 12px;
+        mouse-cursor: ew-resize;
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(2); } }
+    }
+    if !root.is-maximized: TouchArea {
+        x: 6px; y: 0; width: parent.width - 12px; height: 4px;
+        mouse-cursor: ns-resize;
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(0); } }
+    }
+    if !root.is-maximized: TouchArea {
+        x: 6px; y: parent.height - 5px; width: parent.width - 12px; height: 5px;
+        mouse-cursor: ns-resize;
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(4); } }
+    }
+    if !root.is-maximized: TouchArea {
+        x: 0; y: 0; width: 8px; height: 8px;
+        mouse-cursor: nwse-resize;
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(7); } }
+    }
+    if !root.is-maximized: TouchArea {
+        x: parent.width - 8px; y: 0; width: 8px; height: 8px;
+        mouse-cursor: nesw-resize;
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(1); } }
+    }
+    if !root.is-maximized: TouchArea {
+        x: 0; y: parent.height - 8px; width: 8px; height: 8px;
+        mouse-cursor: nesw-resize;
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(5); } }
+    }
+    if !root.is-maximized: TouchArea {
+        x: parent.width - 8px; y: parent.height - 8px; width: 8px; height: 8px;
+        mouse-cursor: nwse-resize;
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(3); } }
+    }
+
+    init => { fs.focus(); }
+}

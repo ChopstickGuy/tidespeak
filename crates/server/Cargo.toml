@@ -1,0 +1,16 @@
+[package]
+name = "tidespeak-server"
+description = "Tidespeak voice and text chat server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tidespeak-proto.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+bytes.workspace = true
+log.workspace = true
+env_logger.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }

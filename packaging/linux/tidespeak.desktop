@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Tidespeak
+GenericName=Sprach- und Textchat
+Comment=Verschlüsselter Sprach- und Textchat ohne Konto
+Exec=tidespeak
+Icon=tidespeak
+Terminal=false
+Categories=Network;Chat;InstantMessaging;AudioVideo;
+Keywords=voice;chat;teamspeak;discord;sprachchat;
+StartupWMClass=tidespeak
