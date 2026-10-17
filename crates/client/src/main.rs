@@ -30,7 +30,7 @@ const PTT_KEYS: [(&str, Key, u32); 8] = [
     ("F8", Key::F8, 0x77),
     ("F9", Key::F9, 0x78),
 ];
-const BITRATES: [i32; 3] = [24_000, 48_000, 96_000];
+const BITRATES: [i32; 3] = [32_000, 64_000, 96_000];
 const AVATAR_COLORS: [u32; 10] =
     [0x3584e4, 0x2ec27e, 0xe5a50a, 0xe66100, 0xc061cb, 0x1c9fb0, 0x9141ac, 0xd5375a, 0x26a269, 0x865e3c];
 const MAX_LOG: usize = 400;
@@ -49,6 +49,8 @@ struct State {
     key_change_address: Option<String>,
     input_names: Vec<String>,
     output_names: Vec<String>,
+    /// Person whose volume is currently being adjusted
+    volume_target: Option<(u32, String)>,
     messages: Rc<VecModel<MessageItem>>,
     channel_model: Rc<VecModel<ChannelItem>>,
 }
@@ -103,6 +105,7 @@ fn audio_settings(cfg: &Config) -> AudioSettings {
         voice_mode: cfg.voice_mode,
         activation_threshold: cfg.activation_threshold,
         noise_suppression: cfg.noise_suppression,
+        agc: cfg.auto_gain,
         bitrate: cfg.opus_bitrate,
         ptt_key: PTT_KEYS[ptt].2,
     }
@@ -144,6 +147,7 @@ fn main() {
     window.set_threshold(cfg.activation_threshold);
     window.set_voice_mode(cfg.voice_mode.index());
     window.set_noise_suppression(cfg.noise_suppression);
+    window.set_auto_gain(cfg.auto_gain);
     window.set_quality_index(BITRATES.iter().position(|b| *b == cfg.opus_bitrate).unwrap_or(1) as i32);
     let keys: Vec<SharedString> = PTT_KEYS.iter().map(|k| k.0.into()).collect();
     window.set_ptt_keys(ModelRc::new(VecModel::from(keys)));
@@ -165,6 +169,7 @@ fn main() {
             key_change_address: None,
             input_names: Vec::new(),
             output_names: Vec::new(),
+            volume_target: None,
             messages,
             channel_model,
         })
@@ -355,6 +360,7 @@ fn wire_callbacks(window: &MainWindow, audio: &Arc<Audio>, net_tx: &UnboundedSen
                 c.activation_threshold = w.get_threshold();
                 c.voice_mode = VoiceMode::from_index(w.get_voice_mode());
                 c.noise_suppression = w.get_noise_suppression();
+                c.auto_gain = w.get_auto_gain();
                 c.opus_bitrate = BITRATES[(w.get_quality_index().max(0) as usize).min(2)];
                 c.ptt_key = key.0.to_string();
                 c.save();
@@ -378,6 +384,40 @@ fn wire_callbacks(window: &MainWindow, audio: &Arc<Audio>, net_tx: &UnboundedSen
             false
         });
     }
+
+    // ── Lautstärke pro Person
+    {
+        let weak = window.as_weak();
+        let audio = audio.clone();
+        window.on_open_user(move |id, name| {
+            let Some(w) = weak.upgrade() else { return };
+            let gain = with_state(|s| {
+                s.volume_target = Some((id as u32, name.to_string()));
+                s.cfg.user_volumes.get(name.as_str()).copied().unwrap_or(1.0)
+            });
+            w.set_volume_name(name);
+            w.set_volume_value(gain / 2.0);
+            w.set_volume_stats(volume_stats(&audio, id as u32).into());
+            w.set_volume_open(true);
+        });
+    }
+    {
+        let audio = audio.clone();
+        window.on_user_volume_moved(move |v| {
+            let gain = v * 2.0;
+            with_state(|s| {
+                if let Some((id, name)) = &s.volume_target {
+                    audio.set_user_gain(*id, gain);
+                    if (gain - 1.0).abs() < 0.02 {
+                        s.cfg.user_volumes.remove(name);
+                    } else {
+                        s.cfg.user_volumes.insert(name.clone(), gain);
+                    }
+                }
+            });
+        });
+    }
+    window.on_user_volume_done(|| with_state(|s| s.cfg.save()));
 
     // ── Fenster (eigene Kopfleiste)
     {
@@ -431,6 +471,26 @@ fn wire_callbacks(window: &MainWindow, audio: &Arc<Audio>, net_tx: &UnboundedSen
     }
     window.on_close_window(|| {
         let _ = slint::quit_event_loop();
+    });
+}
+
+fn volume_stats(audio: &Audio, id: u32) -> String {
+    match audio.shared.rx.lock().unwrap().get(&id) {
+        Some(r) => format!(
+            "Empfang: {:.1} % Verlust · Schwankung {:.0} ms · Puffer {:.0} ms",
+            r.loss, r.jitter_ms, r.buffer_ms
+        ),
+        None => "Noch keine Sprachdaten empfangen.".into(),
+    }
+}
+
+/// Saved volumes (by name) for everyone who is currently online
+fn apply_user_gains(audio: &Audio) {
+    with_state(|s| {
+        for u in s.users.values() {
+            let g = s.cfg.user_volumes.get(&u.name).copied().unwrap_or(1.0);
+            audio.set_user_gain(u.id, g);
+        }
     });
 }
 
@@ -507,8 +567,17 @@ fn refresh_devices(w: &MainWindow, audio: &Audio) {
 fn tick(w: &MainWindow, audio: &Audio) {
     let transmitting = audio.shared.transmitting.load(Ordering::Relaxed);
     w.set_transmitting(transmitting);
+    if w.get_volume_open() {
+        if let Some((id, _)) = with_state(|s| s.volume_target.clone()) {
+            w.set_volume_stats(volume_stats(audio, id).into());
+        }
+    }
     if w.get_page() == 2 {
         w.set_level(audio.shared.level());
+        let info = audio.shared.input_info.lock().unwrap().clone();
+        if w.get_input_info() != info.as_str() {
+            w.set_input_info(info.into());
+        }
     } else if w.get_mic_test() {
         // Mikrofontest endet beim Verlassen der Einstellungen
         w.set_mic_test(false);
@@ -686,6 +755,7 @@ fn on_event(w: &MainWindow, ev: Event) {
             refresh_channels();
             refresh_recents(w);
             w.invoke_refresh_devices();
+            with_audio(apply_user_gains);
             cue_for(w, Cue::Connected);
         }
         Event::Failed { reason, changed_key } => {
@@ -701,6 +771,10 @@ fn on_event(w: &MainWindow, ev: Event) {
         }
         Event::Disconnected { reason } => {
             w.set_conn_state(0);
+            w.set_ping_ms(0);
+            w.set_tx_loss(0);
+            w.set_rx_loss(0.0);
+            w.set_volume_open(false);
             if w.get_page() == 1 {
                 w.set_page(0);
             }
@@ -723,6 +797,7 @@ fn on_event(w: &MainWindow, ev: Event) {
                 w.set_online_count(s.users.len() as i32);
                 mine
             });
+            with_audio(apply_user_gains);
             refresh_channels();
             if mine {
                 cue_for(w, Cue::Join);
@@ -774,6 +849,11 @@ fn on_event(w: &MainWindow, ev: Event) {
             }
         }
         Event::Chat(c) => with_state(|s| push_entry(s, c.channel, chat_entry(&c))),
+        Event::Stats { rtt_ms, uplink_loss, downlink_loss } => {
+            w.set_ping_ms(rtt_ms as i32);
+            w.set_tx_loss(uplink_loss as i32);
+            w.set_rx_loss(downlink_loss);
+        }
         Event::History { channel, lines } => with_state(|s| {
             // Verlauf vom Server zuerst, eigene Hinweise (Begrüßung usw.) bleiben danach erhalten
             let mut log: Vec<Entry> = lines.iter().map(chat_entry).collect();
@@ -786,6 +866,14 @@ fn on_event(w: &MainWindow, ev: Event) {
             }
         }),
     }
+}
+
+fn with_audio(f: impl FnOnce(&Audio)) {
+    AUDIO_FOR_CUES.with(|a| {
+        if let Some(a) = a.borrow().as_ref() {
+            f(a);
+        }
+    });
 }
 
 fn cue_for(_w: &MainWindow, cue: Cue) {

@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const ALPN: &[u8] = b"tidespeak/1";
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const DEFAULT_PORT: u16 = 9987;
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_CHAT_CHARS: usize = 2000;
@@ -59,6 +59,8 @@ pub enum ClientMsg {
     Join { channel: u32 },
     Chat { text: String },
     State { muted: bool, deafened: bool },
+    /// Receive quality per speaker: (speaker id, loss in percent). About every 2 s.
+    Report { loss: Vec<(u32, u8)> },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -76,6 +78,8 @@ pub enum ServerMsg {
     UserLeft { id: u32 },
     Chat(ChatLine),
     History { channel: u32, lines: Vec<ChatLine> },
+    /// How well your voice arrives at `listener`: loss in percent
+    Feedback { listener: u32, loss: u8 },
 }
 
 #[derive(Debug)]

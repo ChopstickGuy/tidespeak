@@ -42,6 +42,14 @@ pub enum Event {
     UserLeft(u32),
     Chat(ChatLine),
     History { channel: u32, lines: Vec<ChatLine> },
+    /// Connection quality, about every 2 s
+    Stats {
+        rtt_ms: u32,
+        /// Loss of our voice at the others (highest value, percent)
+        uplink_loss: u32,
+        /// Loss of incoming voice (average over speakers, percent)
+        downlink_loss: f32,
+    },
 }
 
 pub fn spawn(audio: Arc<Audio>, on_event: impl Fn(Event) + Send + Sync + 'static) -> mpsc::UnboundedSender<Command> {
@@ -246,8 +254,24 @@ async fn session(
     let _ = write_msg(&mut send, &state_msg).await;
 
     let mut next = None;
+    let mut feedback: std::collections::HashMap<u32, (u8, std::time::Instant)> = Default::default();
+    let mut ticker = tokio::time::interval(Duration::from_secs(2));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let reason = loop {
         tokio::select! {
+            _ = ticker.tick() => {
+                // eigene Empfangsqualität an den Server melden -> die Sprecher passen ihre Fehlerkorrektur an
+                let rx = audio.shared.rx.lock().unwrap().clone();
+                if !rx.is_empty() {
+                    let loss = rx.iter().map(|(id, r)| (*id, r.loss.round().clamp(0.0, 100.0) as u8)).collect();
+                    let _ = write_msg(&mut send, &ClientMsg::Report { loss }).await;
+                }
+                feedback.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(6));
+                let uplink = feedback.values().map(|(l, _)| *l as u32).max().unwrap_or(0);
+                audio.shared.uplink_loss.store(uplink, std::sync::atomic::Ordering::Relaxed);
+                let downlink = if rx.is_empty() { 0.0 } else { rx.values().map(|r| r.loss).sum::<f32>() / rx.len() as f32 };
+                on_event(Event::Stats { rtt_ms: (conn.rtt().as_micros().div_ceil(1000) as u32).max(1), uplink_loss: uplink, downlink_loss: downlink });
+            }
             msg = read_msg::<_, ServerMsg>(&mut recv) => match msg {
                 Ok(Some(m)) => match m {
                     ServerMsg::UserJoined(u) => on_event(Event::UserJoined(u)),
@@ -255,6 +279,9 @@ async fn session(
                     ServerMsg::UserLeft { id } => on_event(Event::UserLeft(id)),
                     ServerMsg::Chat(c) => on_event(Event::Chat(c)),
                     ServerMsg::History { channel, lines } => on_event(Event::History { channel, lines }),
+                    ServerMsg::Feedback { listener, loss } => {
+                        feedback.insert(listener, (loss, std::time::Instant::now()));
+                    }
                     ServerMsg::Rejected { reason } => break reason,
                     ServerMsg::Welcome { .. } => {}
                 },

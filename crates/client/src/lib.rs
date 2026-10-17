@@ -2,5 +2,7 @@
 
 pub mod audio;
 pub mod config;
+pub mod dsp;
+pub mod jitter;
 pub mod net;
 pub mod tofu;

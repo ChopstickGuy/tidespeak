@@ -88,7 +88,15 @@ component SidebarItem inherits Rectangle {
 
 component UserRow inherits Rectangle {
     in property <UserItem> user;
+    callback clicked();
     height: 32px;
+    border-radius: 6px;
+    background: !root.user.me && uta.has-hover ? Theme.sidebar-hover : transparent;
+    uta := TouchArea {
+        enabled: !root.user.me;
+        mouse-cursor: root.user.me ? default : pointer;
+        clicked => { root.clicked(); }
+    }
     HorizontalLayout {
         padding-left: 34px;
         padding-right: 10px;
@@ -215,6 +223,17 @@ export component MainWindow inherits Window {
     in property <bool> transmitting;
     in property <string> version;
 
+    // Verbindungsqualität
+    in property <int> ping-ms;
+    in property <float> rx-loss;
+    in property <int> tx-loss;
+
+    // Lautstärke pro Person
+    in-out property <bool> volume-open: false;
+    in property <string> volume-name;
+    in property <string> volume-stats;
+    in-out property <float> volume-value: 0.5;
+
     // Einstellungen
     in property <[DeviceItem]> input-devices;
     in property <[DeviceItem]> output-devices;
@@ -248,6 +267,11 @@ export component MainWindow inherits Window {
     callback select-output(int);
     callback settings-changed();
     callback refresh-devices();
+    callback open-user(int, string);
+    callback user-volume-moved(float);
+    callback user-volume-done();
+    in property <string> input-info;
+    in-out property <bool> auto-gain;
     callback key-event(string, bool) -> bool;
     callback start-drag();
     callback start-resize(int);
@@ -310,7 +334,11 @@ export component MainWindow inherits Window {
                                     horizontal-stretch: 1;
                                     spacing: 1px;
                                     Text { color: Theme.text; text: root.server-name; font-weight: 700; overflow: elide; }
-                                    Text { text: root.online-count + " online · verschlüsselt"; font-size: Theme.font-small; color: Theme.text-dim; }
+                                    Text {
+                                        text: root.online-count + " online · " + (root.ping-ms > 0 ? root.ping-ms + " ms Ping" : "verschlüsselt");
+                                        font-size: Theme.font-small;
+                                        color: Theme.text-dim;
+                                    }
                                 }
                             }
                         }
@@ -363,7 +391,10 @@ export component MainWindow inherits Window {
                                         root.join-channel(ch.id);
                                     }
                                 }
-                                for u in ch.users: UserRow { user: u; }
+                                for u in ch.users: UserRow {
+                                    user: u;
+                                    clicked => { root.open-user(u.id, u.name); }
+                                }
                             }
                         }
                     }
@@ -769,7 +800,16 @@ export component MainWindow inherits Window {
                                     }
                                     if root.input-error != "": Row { title: root.input-error; dimmed: true; has-icon: true; icon: @image-url("../assets/icons/circle-alert.svg"); }
                                     Row {
+                                        title: "Automatische Lautstärke";
+                                        subtitle: "Gleicht leise und laute Mikrofone aus – ideal für Audio-Interfaces und XLR-Mikrofone.";
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Switch { checked <=> root.auto-gain; toggled => { root.settings-changed(); } }
+                                        }
+                                    }
+                                    Row {
                                         title: "Verstärkung";
+                                        subtitle: root.input-info;
                                         Slider {
                                             width: 300px;
                                             value <=> root.input-gain;
@@ -885,6 +925,39 @@ export component MainWindow inherits Window {
                                 }
                             }
 
+                            if root.conn-state == 2: VerticalLayout {
+                                GroupTitle { title: "Verbindung"; description: "Paketverlust bis 2 % ist unproblematisch – Tidespeak rekonstruiert fehlende Pakete. Darüber hilft meist ein LAN-Kabel statt WLAN."; }
+                                BoxedList {
+                                    Row {
+                                        title: "Ping zum Server";
+                                        Text {
+                                            text: root.ping-ms > 0 ? root.ping-ms + " ms" : "–";
+                                            vertical-alignment: center;
+                                            color: root.ping-ms < 80 ? Theme.success : root.ping-ms < 150 ? Theme.warning : Theme.error;
+                                        }
+                                    }
+                                    Row {
+                                        title: "Empfang";
+                                        subtitle: "Wie vollständig die Stimmen der anderen bei dir ankommen";
+                                        Text {
+                                            text: Math.round(root.rx-loss * 10) / 10 + " % Verlust";
+                                            vertical-alignment: center;
+                                            color: root.rx-loss < 2 ? Theme.success : root.rx-loss < 8 ? Theme.warning : Theme.error;
+                                        }
+                                    }
+                                    Row {
+                                        title: "Deine Stimme bei den anderen";
+                                        subtitle: "Von den Zuhörern gemeldet – bei Verlust erhöht Tidespeak automatisch die Fehlerkorrektur";
+                                        separator: false;
+                                        Text {
+                                            text: root.tx-loss + " % Verlust";
+                                            vertical-alignment: center;
+                                            color: root.tx-loss < 2 ? Theme.success : root.tx-loss < 8 ? Theme.warning : Theme.error;
+                                        }
+                                    }
+                                }
+                            }
+
                             if root.fingerprint != "": VerticalLayout {
                                 GroupTitle { title: "Sicherheit"; description: "Vergleiche den Fingerabdruck mit der Anzeige des Servers – stimmen sie überein, bist du wirklich mit ihm verbunden."; }
                                 BoxedList {
@@ -915,6 +988,45 @@ export component MainWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    // Lautstärke pro Person (Klick auf einen Namen in der Seitenleiste)
+    if root.volume-open: TouchArea {
+        clicked => { root.volume-open = false; }
+    }
+    if root.volume-open: Rectangle {
+        x: 282px;
+        y: 60px;
+        width: 320px;
+        height: vol.preferred-height;
+        border-radius: Theme.radius;
+        background: Theme.card;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000080;
+        TouchArea { }
+        vol := VerticalLayout {
+            padding: 16px;
+            spacing: 10px;
+            HorizontalLayout {
+                spacing: 10px;
+                Text { text: root.volume-name; font-weight: 700; font-size: Theme.font-title; color: Theme.text; horizontal-stretch: 1; overflow: elide; }
+                RoundButton { icon: @image-url("../assets/icons/x.svg"); size: 24px; icon-size: 12px; clicked => { root.volume-open = false; } }
+            }
+            Text { text: "Lautstärke nur für dich"; color: Theme.text-dim; font-size: Theme.font-small; }
+            HorizontalLayout {
+                spacing: 10px;
+                Slider {
+                    horizontal-stretch: 1;
+                    value <=> root.volume-value;
+                    moved(v) => { root.user-volume-moved(v); }
+                    released => { root.user-volume-done(); }
+                }
+                Text { text: Math.round(root.volume-value * 200) + " %"; width: 44px; color: Theme.text; vertical-alignment: center; horizontal-alignment: right; }
+            }
+            if root.volume-stats != "": Text { text: root.volume-stats; color: Theme.text-dim; font-size: Theme.font-small; wrap: word-wrap; }
         }
     }
 

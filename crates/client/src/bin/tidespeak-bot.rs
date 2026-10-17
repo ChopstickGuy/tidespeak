@@ -16,7 +16,7 @@ use tidespeak_proto::*;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("tidespeak-bot <adresse> <name> [--speak SEK] [--listen SEK] [--chat TEXT] [--channel ID] [--pin FP] [--speak-delay SEK]");
+        eprintln!("tidespeak-bot <adresse> <name> [--speak SEK] [--listen SEK] [--chat TEXT] [--channel ID] [--pin FP] [--speak-delay SEK] [--loss PROZENT]");
         std::process::exit(2);
     }
     let address = tidespeak::config::normalize_address(&args[1]);
@@ -27,6 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut channel: Option<u32> = None;
     let mut pin: Option<String> = None;
     let mut speak_delay = 0.0f32;
+    let mut loss_pct = 0.0f64;
     let mut i = 3;
     while i < args.len() {
         let v = args.get(i + 1).cloned().unwrap_or_default();
@@ -37,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--channel" => channel = Some(v.parse()?),
             "--pin" => pin = Some(v),
             "--speak-delay" => speak_delay = v.parse()?,
+            "--loss" => loss_pct = v.parse()?,
             a => return Err(format!("unbekannt: {a}").into()),
         }
         i += 2;
@@ -111,7 +113,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pkt.extend_from_slice(&seq.to_le_bytes());
             pkt.push(0);
             pkt.extend_from_slice(&opus);
-            if speak_conn.send_datagram(Bytes::from(pkt)).is_ok() {
+            // schlechte Leitung nachstellen: Pakete zufällig verwerfen
+            let r = (seq as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40;
+            if (r % 10_000) as f64 >= loss_pct * 100.0 && speak_conn.send_datagram(Bytes::from(pkt)).is_ok() {
                 sent += 1;
             }
         }
@@ -152,6 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(Some(ServerMsg::UserJoined(u))) => println!("beigetreten: {} (#{})", u.name, u.id),
                 Ok(Some(ServerMsg::UserLeft { id })) => println!("verlassen: #{id}"),
                 Ok(Some(ServerMsg::History { channel, lines })) => println!("verlauf kanal {channel}: {} zeilen", lines.len()),
+                Ok(Some(ServerMsg::Feedback { listener, loss })) => println!("rückmeldung: #{listener} empfängt mich mit {loss} % Verlust"),
                 Ok(Some(_)) => {}
                 _ => break,
             },

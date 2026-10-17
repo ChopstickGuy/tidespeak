@@ -41,6 +41,7 @@ struct User {
     chat_last: Instant,
     voice_window: Instant,
     voice_count: u32,
+    last_report: Instant,
 }
 
 struct State {
@@ -168,6 +169,34 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     }
 }
 
+/// UDP socket for IPv4 *and* IPv6 (one socket, dual stack). Friends on
+/// DS-Lite/IPv6-only connections can also connect that way. Larger buffers
+/// protect against packet loss when many people talk at once.
+fn bind_socket(port: u16) -> std::io::Result<(std::net::UdpSocket, bool)> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let open = |v6: bool| -> std::io::Result<std::net::UdpSocket> {
+        let domain = if v6 { Domain::IPV6 } else { Domain::IPV4 };
+        let s = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+        if v6 {
+            s.set_only_v6(false)?;
+        }
+        let _ = s.set_recv_buffer_size(4 << 20);
+        let _ = s.set_send_buffer_size(4 << 20);
+        s.set_nonblocking(true)?;
+        let addr: SocketAddr = if v6 {
+            (std::net::Ipv6Addr::UNSPECIFIED, port).into()
+        } else {
+            (std::net::Ipv4Addr::UNSPECIFIED, port).into()
+        };
+        s.bind(&addr.into())?;
+        Ok(s.into())
+    };
+    match open(true) {
+        Ok(s) => Ok((s, true)),
+        Err(_) => open(false).map(|s| (s, false)),
+    }
+}
+
 fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -217,11 +246,22 @@ async fn main() {
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls).expect("QUIC-TLS")));
     server_config.transport_config(Arc::new(transport));
 
-    let addr: SocketAddr = ([0, 0, 0, 0], opts.port).into();
-    let endpoint = match quinn::Endpoint::server(server_config, addr) {
-        Ok(e) => e,
+    let (socket, dual) = match bind_socket(opts.port) {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("Fehler: Port {} (UDP) nicht verfügbar: {e}", opts.port);
+            std::process::exit(1);
+        }
+    };
+    let endpoint = match quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        Some(server_config),
+        socket,
+        Arc::new(quinn::TokioRuntime),
+    ) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Fehler: Server konnte nicht starten: {e}");
             std::process::exit(1);
         }
     };
@@ -237,7 +277,7 @@ async fn main() {
     println!("  Tidespeak Server {}", env!("CARGO_PKG_VERSION"));
     println!("  ─────────────────────────────────────────────");
     println!("  Name:            {}", opts.name);
-    println!("  Port:            {} (UDP)", opts.port);
+    println!("  Port:            {} (UDP, {})", opts.port, if dual { "IPv4 + IPv6" } else { "nur IPv4" });
     if let Some(ip) = local_ip() {
         println!("  Im Netzwerk:     {ip}:{}", opts.port);
     }
@@ -248,6 +288,7 @@ async fn main() {
     }
     println!("  ─────────────────────────────────────────────");
     println!("  Clients zeigen beim ersten Verbinden denselben Fingerabdruck an.");
+    println!("  Von außerhalb: deine öffentliche IP (z. B. ifconfig.me) – im Router UDP {} weiterleiten.", opts.port);
     println!();
 
     let state: Shared = Arc::new(Mutex::new(State {
@@ -329,6 +370,7 @@ async fn handle_connection(incoming: quinn::Incoming, state: Shared) -> Result<(
                 chat_last: Instant::now(),
                 voice_window: Instant::now(),
                 voice_count: 0,
+                last_report: Instant::now() - Duration::from_secs(10),
             },
         );
         (id, info)
@@ -411,6 +453,21 @@ async fn control_loop(state: &Shared, id: u32, recv: &mut quinn::RecvStream) -> 
                     history.pop_front();
                 }
                 st.broadcast_channel(channel, &ServerMsg::Chat(line));
+            }
+            ClientMsg::Report { loss } => {
+                // Empfangsqualität an die jeweiligen Sprecher weitergeben (höchstens 1× pro Sekunde)
+                let Some(u) = st.users.get_mut(&id) else { break };
+                if u.last_report.elapsed() < Duration::from_secs(1) {
+                    continue;
+                }
+                u.last_report = Instant::now();
+                for (speaker, pct) in loss.into_iter().take(64) {
+                    if speaker != id {
+                        if let Some(s) = st.users.get(&speaker) {
+                            let _ = s.tx.send(ServerMsg::Feedback { listener: id, loss: pct.min(100) });
+                        }
+                    }
+                }
             }
             ClientMsg::State { muted, deafened } => {
                 let Some(u) = st.users.get_mut(&id) else { break };
