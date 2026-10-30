@@ -1,6 +1,6 @@
 //! Settings: `~/.config/tidespeak/config.toml` (Linux) or `%APPDATA%\Tidespeak\config.toml` (Windows).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,22 @@ pub struct Config {
     pub ptt_key: String,
     /// Volume per person (by name, since ids change on every connect)
     pub user_volumes: BTreeMap<String, f32>,
+    /// Interface language: "auto" (English, German on a German system), "en" or "de"
+    pub language: String,
+    /// Quiet typing clicks and beeps during sequences and confirmations
+    pub terminal_sounds: bool,
+    /// The server wave keeps rolling (about 8 frames per second)
+    pub anim_wave: bool,
+    /// Connection sequence when connecting (full on the first visit of a server)
+    pub anim_connect: bool,
+    /// Start and quit sequence
+    pub anim_start: bool,
+    /// Target lock when someone joins, particles when someone leaves
+    pub anim_join: bool,
+    /// Wireframe transition when switching channels
+    pub anim_switch: bool,
+    /// Servers whose fingerprint the person confirmed by hand
+    pub verified_servers: BTreeSet<String>,
 }
 
 impl Default for Config {
@@ -83,6 +99,14 @@ impl Default for Config {
             opus_bitrate: 64_000,
             ptt_key: "F2".into(),
             user_volumes: BTreeMap::new(),
+            language: "auto".into(),
+            terminal_sounds: true,
+            anim_wave: true,
+            anim_connect: true,
+            anim_start: true,
+            anim_join: true,
+            anim_switch: true,
+            verified_servers: BTreeSet::new(),
         }
     }
 }
@@ -92,7 +116,7 @@ fn default_name() -> String {
         .or_else(|_| std::env::var("USER"))
         .ok()
         .filter(|n| !n.trim().is_empty())
-        .unwrap_or_else(|| "Gast".into())
+        .unwrap_or_else(|| "Guest".into())
 }
 
 fn path() -> Option<PathBuf> {

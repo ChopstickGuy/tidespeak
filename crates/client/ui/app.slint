@@ -1,1305 +1,191 @@
-// Tidespeak – Hauptfenster in der Netz-Ansicht:
-// Server im Zentrum, Kanäle als Knoten, Personen daran, Funkprotokoll rechts,
-// Einstellungen als Schublade von rechts.
+// Tidespeak – Fenster. Die ganze Oberfläche ist ein Zeichenraster, das Rust zeichnet
+// (crates/client/src/ui). Slint zeigt das Bild, meldet Maus und Tastatur und stellt
+// drei echte Eingabefelder bereit (Einfügen, Auswahl, Eingabemethoden).
 
-import { ScrollView } from "std-widgets.slint";
-import { Theme } from "theme.slint";
-import { Icon, Button, RoundButton, Entry, Switch, Radio, Slider, LevelMeter, BoxedList, Row, GroupTitle, CutPanel, MonoLabel, DockButton } from "widgets.slint";
-import { NetView, NetChannel, NetUser } from "net.slint";
-
-import "../assets/fonts/Inter-Regular.ttf";
-import "../assets/fonts/Inter-Medium.ttf";
-import "../assets/fonts/Inter-SemiBold.ttf";
-import "../assets/fonts/Inter-Bold.ttf";
 import "../assets/fonts/JetBrainsMono-Regular.ttf";
 import "../assets/fonts/JetBrainsMono-Bold.ttf";
 
-export { NetChannel, NetUser }
-
-export struct MessageItem {
-    author: string,
-    initial: string,
-    color: color,
-    time: string,
-    text: string,
-    system: bool,
-    grouped: bool,
-    // dich erwähnt (@Name)
-    mention: bool,
+// Ein Ausschnitt des Zeichenrasters – nur geänderte Kacheln werden neu übertragen
+export struct Tile {
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    img: image,
 }
 
-export struct RecentItem {
-    address: string,
-    subtitle: string,
-}
-
-export struct DeviceItem {
-    name: string,
-    selected: bool,
-}
-
-// Eine Zeile im Funkprotokoll: "[20:38] JONAS" und darunter der Text
-component LogLine inherits Rectangle {
-    in property <MessageItem> msg;
-    background: root.msg.mention ? #3584e426 : transparent;
-    if root.msg.mention: Rectangle { x: 0; width: 2px; background: Theme.accent; }
-    VerticalLayout {
-        padding-left: 18px;
-        padding-right: 18px;
-        padding-top: root.msg.system ? 8px : root.msg.grouped ? 2px : 12px;
-        padding-bottom: root.msg.system ? 4px : 2px;
-        spacing: 3px;
-        if root.msg.system: Text {
-            text: "// " + root.msg.text;
-            font-family: "JetBrains Mono";
-            font-size: 11px;
-            color: Theme.text-faint;
-            wrap: word-wrap;
-        }
-        if !root.msg.system && !root.msg.grouped: Text {
-            text: "[" + root.msg.time + "] " + root.msg.author.to-uppercase();
-            font-family: "JetBrains Mono";
-            font-size: 11px;
-            letter-spacing: 0.6px;
-            color: root.msg.mention ? Theme.accent-hover : root.msg.color.brighter(0.4);
-            overflow: elide;
-        }
-        if !root.msg.system: TextInput {
-            text: root.msg.text;
-            read-only: true;
-            wrap: word-wrap;
-            single-line: false;
-            color: #ffffffe6;
-            selection-background-color: Theme.accent.transparentize(0.4);
-            selection-foreground-color: Theme.text;
-        }
-    }
-}
-
-// Abschnitt in der Einstellungs-Schublade
-component Section inherits VerticalLayout {
-    in property <string> title;
-    in property <string> description;
-    spacing: 8px;
-    MonoLabel { text: root.title; }
-    if root.description != "": Text { text: root.description; color: Theme.text-dim; font-size: Theme.font-small; wrap: word-wrap; }
-    CutPanel {
-        cut: 10px;
-        fill: #2e2e30;
-        stroke: #ffffff12;
-        VerticalLayout { @children }
-    }
-}
-
-component SquareButton inherits Rectangle {
-    in property <image> icon;
-    callback clicked();
-    width: 36px;
-    height: 36px;
-    border-radius: Theme.radius-small;
-    border-width: 1px;
-    border-color: #ffffff24;
-    background: ta.pressed ? #3a3a3c : ta.has-hover ? #333335 : #2b2b2df2;
-    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
-    Icon { source: root.icon; width: 16px; height: 16px; }
+component Field inherits TextInput {
+    in property <bool> shown;
+    in property <length> fx;
+    in property <length> fy;
+    in property <length> fw;
+    x: root.fx;
+    y: root.fy;
+    width: root.fw;
+    height: 16px;
+    visible: root.shown;
+    enabled: root.shown;
+    single-line: true;
+    font-family: "JetBrains Mono";
+    font-size: 13.333px;
+    color: #ffffff;
+    vertical-alignment: center;
+    selection-background-color: #22d3ee66;
+    selection-foreground-color: #ffffff;
 }
 
 export component MainWindow inherits Window {
     title: "Tidespeak";
     icon: @image-url("../assets/tidespeak.svg");
-    preferred-width: 1280px;
-    preferred-height: 780px;
-    min-width: 900px;
-    min-height: 580px;
+    preferred-width: 1440px;
+    preferred-height: 896px;
+    min-width: 1360px;
+    min-height: 720px;
     no-frame: true;
-    background: #1b1b1e;
-    default-font-family: "Inter";
-    default-font-size: Theme.font;
+    background: #141416;
+    default-font-family: "JetBrains Mono";
 
-    // 0 = getrennt, 1 = verbinde, 2 = verbunden
-    in property <int> conn-state: 0;
-    in property <bool> is-maximized: false;
-    in property <string> server-name;
-    in property <string> server-address;
-    in property <string> fingerprint;
-    in property <string> error-text;
-    in property <bool> key-changed: false;
-    in property <string> key-old;
-    in property <string> key-new;
-    in property <[MessageItem]> messages;
-    in property <string> channel-name;
-    in property <string> channel-code;
-    in property <int> online-count;
-    in property <[RecentItem]> recents;
-    in-out property <string> address;
-    in-out property <string> nick;
-    in property <string> me-initial;
-    in property <color> me-color;
-    in-out property <bool> muted;
-    in-out property <bool> deafened;
-    in property <bool> transmitting;
-    in-out property <bool> chat-open: true;
-    in-out property <bool> away;
-    in-out property <bool> echo-cancel;
-    in-out property <bool> auto-threshold;
-    in property <float> threshold-now;
-    in-out property <string> toast-title;
-    in-out property <string> toast-text;
-    in property <string> version;
+    in property <[Tile]> tiles;
+    in property <bool> is-maximized;
+    in property <bool> hand;
 
-    // Netz
-    in property <[NetChannel]> net-channels;
-    in property <[NetUser]> net-users;
-    in property <float> net-extent-x: 1.2;
-    in property <float> net-extent-y: 1.2;
-    in property <float> pulse;
+    // Eingabefelder: 0 = Server, 1 = Name, 2 = Chat
+    in-out property <string> text0;
+    in-out property <string> text1;
+    in-out property <string> text2;
+    in property <bool> shown0;
+    in property <bool> shown1;
+    in property <bool> shown2;
+    in property <length> x0;
+    in property <length> y0;
+    in property <length> w0;
+    in property <length> x1;
+    in property <length> y1;
+    in property <length> w1;
+    in property <length> x2;
+    in property <length> y2;
+    in property <length> w2;
 
-    // Verbindungsqualität
-    in property <int> ping-ms;
-    in property <float> rx-loss;
-    in property <int> tx-loss;
-
-    // Personen-Karte (Lautstärke nur für dich, Empfangswerte)
-    in-out property <int> card-index: -1;
-    in-out property <float> volume-value: 0.5;
-    in property <string> card-loss;
-    in property <string> card-buffer;
-    in property <string> card-jitter;
-    in property <int> card-tone;
-
-    // Einstellungen
-    in-out property <bool> settings-open: false;
-    in-out property <int> settings-tab: 0;
-    in property <[DeviceItem]> input-devices;
-    in property <[DeviceItem]> output-devices;
-    in property <string> input-error;
-    in property <string> output-error;
-    in-out property <float> input-gain;
-    in-out property <float> output-volume;
-    in-out property <float> threshold;
-    in-out property <int> voice-mode;
-    in-out property <bool> noise-suppression;
-    in-out property <bool> mic-test;
-    in property <float> level;
-    in property <string> ptt-key-name;
-    in property <[string]> ptt-keys;
-    in-out property <int> ptt-key-index;
-    in-out property <int> quality-index;
-    in property <string> input-info;
-    in-out property <bool> auto-gain;
-
-    property <bool> stick-bottom: true;
-    property <length> header-h: 56px;
-
-    callback connect();
-    callback cancel();
-    callback disconnect();
-    callback trust-new-key();
-    callback forget-error();
-    callback connect-recent(string);
-    callback join-channel(int);
-    callback send-chat(string);
-    callback toggle-mute();
-    callback toggle-deafen();
-    callback select-input(int);
-    callback select-output(int);
-    callback settings-changed();
-    callback refresh-devices();
-    callback open-user(int, string);
-    callback user-volume-moved(float);
-    callback user-volume-done();
-    callback toggle-away();
-    callback poke-user(string);
-    callback key-event(string, bool) -> bool;
-    callback start-drag();
+    callback mouse(string, length, length);
+    callback scrolled(length, length, length);
+    callback key(string, bool) -> bool;
+    callback field-edited(int, string);
+    callback field-accepted(int);
     callback start-resize(int);
-    callback toggle-maximize();
-    callback minimize();
-    callback close-window();
 
-    function toggle-settings() {
-        root.settings-open = !root.settings-open;
-        if (root.settings-open) {
-            root.refresh-devices();
-        }
-        fs.focus();
+    public function focus-field(i: int) {
+        if (i == 0) { f0.focus(); }
+        if (i == 1) { f1.focus(); }
+        if (i == 2) { f2.focus(); }
+        if (i < 0) { fs.focus(); }
     }
 
     fs := FocusScope {
         key-pressed(e) => {
-            if (e.text == Key.Escape) {
-                if (root.settings-open) { root.settings-open = false; return accept; }
-                if (root.card-index >= 0) { root.card-index = -1; return accept; }
-            }
-            if (root.key-event(e.text, true)) { return accept; }
+            if (root.key(e.text, true)) { return accept; }
             return reject;
         }
         key-released(e) => {
-            if (root.key-event(e.text, false)) { return accept; }
+            if (root.key(e.text, false)) { return accept; }
             return reject;
         }
-
-        VerticalLayout {
-            // ─────────────────────────────────────────── Kopfleiste
-            Rectangle {
-                height: root.header-h;
-                background: #1e1e21;
-                Rectangle { y: parent.height - 1px; height: 1px; background: #22d3ee33; }
-                TouchArea {
-                    pointer-event(e) => {
-                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.start-drag(); }
-                    }
-                    double-clicked => { root.toggle-maximize(); }
+        for t in root.tiles: Image {
+            x: t.x;
+            y: t.y;
+            width: t.w;
+            height: t.h;
+            source: t.img;
+            image-rendering: pixelated;
+        }
+        TouchArea {
+            mouse-cursor: root.hand ? pointer : default;
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                    root.mouse("down", self.mouse-x, self.mouse-y);
                 }
-                HorizontalLayout {
-                    padding-left: 20px;
-                    padding-right: 14px;
-                    spacing: 16px;
-                    VerticalLayout {
-                        alignment: center;
-                        Path {
-                            width: 22px;
-                            height: 22px;
-                            viewbox-width: 100;
-                            viewbox-height: 100;
-                            commands: "M 50 0 L 100 25 L 100 75 L 50 100 L 0 75 L 0 25 Z";
-                            fill: Theme.teal;
-                        }
-                    }
-                    Text {
-                        text: "TIDESPEAK";
-                        font-family: "JetBrains Mono";
-                        font-weight: 700;
-                        font-size: 14px;
-                        letter-spacing: 3.4px;
-                        color: Theme.text;
-                        vertical-alignment: center;
-                    }
-                    MonoLabel {
-                        font-size: 11px;
-                        letter-spacing: 1.5px;
-                        overflow: elide;
-                        horizontal-stretch: 1;
-                        text: root.conn-state == 2 ? "NETZ · " + root.server-name.to-uppercase() + " · " + root.online-count + (root.online-count == 1 ? " KNOTEN" : " KNOTEN")
-                            : root.conn-state == 1 ? "VERBINDE …" : "OFFLINE";
-                    }
-                    if root.conn-state == 2: HorizontalLayout {
-                        spacing: 0px;
-                        MonoLabel { text: "PING "; font-size: 11px; letter-spacing: 1px; }
-                        MonoLabel {
-                            text: root.ping-ms > 0 ? root.ping-ms + " ms" : "–";
-                            font-size: 11px;
-                            letter-spacing: 1px;
-                            color: root.ping-ms < 80 ? Theme.success : root.ping-ms < 150 ? Theme.warning : Theme.error;
-                        }
-                        MonoLabel { text: " · TLS 1.3"; font-size: 11px; letter-spacing: 1px; }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        Rectangle {
-                            height: 32px;
-                            border-radius: Theme.radius-small;
-                            border-width: 1px;
-                            border-color: root.settings-open ? #22d3ee80 : #ffffff1f;
-                            background: root.settings-open ? #22d3ee26 : sta.has-hover ? #ffffff17 : #ffffff0f;
-                            sta := TouchArea { mouse-cursor: pointer; clicked => { root.toggle-settings(); } }
-                            HorizontalLayout {
-                                padding-left: 12px;
-                                padding-right: 12px;
-                                spacing: 8px;
-                                VerticalLayout {
-                                    alignment: center;
-                                    Icon {
-                                        source: @image-url("../assets/icons/settings.svg");
-                                        width: 16px;
-                                        height: 16px;
-                                        tint: root.settings-open ? Theme.teal : Theme.text;
-                                    }
-                                }
-                                Text { text: "Einstellungen"; font-size: 13px; font-weight: 600; color: Theme.text; vertical-alignment: center; }
-                            }
-                        }
-                    }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        VerticalLayout {
-                            alignment: center;
-                            RoundButton { size: 28px; icon-size: 12px; icon: @image-url("../assets/icons/minus.svg"); clicked => { root.minimize(); } }
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            RoundButton { size: 28px; icon: @image-url("../assets/icons/square.svg"); icon-size: 11px; clicked => { root.toggle-maximize(); } }
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            RoundButton { size: 28px; icon-size: 12px; icon: @image-url("../assets/icons/x.svg"); clicked => { root.close-window(); } }
-                        }
-                    }
+                if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) {
+                    root.mouse("up", self.mouse-x, self.mouse-y);
                 }
             }
-
-            // ─────────────────────────────────────────── Inhalt
-            Rectangle {
-                vertical-stretch: 1;
-                Image {
-                    width: parent.width;
-                    height: parent.height;
-                    source: @image-url("../assets/grid-dot.svg");
-                    horizontal-tiling: repeat;
-                    vertical-tiling: repeat;
-                }
-
-                // ─────────── Seite: Verbinden
-                if root.conn-state != 2: ScrollView {
-                    vertical-stretch: 1;
-                    content-width: self.visible-width;
-                    HorizontalLayout {
-                        alignment: center;
-                        padding-bottom: 32px;
-                        VerticalLayout {
-                            width: min(640px, root.width - 64px);
-                            alignment: start;
-                            spacing: 22px;
-                            padding-top: 40px;
-
-                            CutPanel {
-                                cut: 18px;
-                                fill: #22d3ee12;
-                                stroke: #22d3ee59;
-                                VerticalLayout {
-                                    padding: 32px;
-                                    spacing: 8px;
-                                    alignment: start;
-                                    MonoLabel { text: "KNOTEN STARTEN // VERBINDUNG HERSTELLEN"; color: Theme.teal; letter-spacing: 2px; }
-                                    Text { color: Theme.text; text: "Willkommen bei Tidespeak"; font-size: 28px; font-weight: 700; }
-                                    Text {
-                                        text: "Sprach- und Textchat für dich und deine Leute – verschlüsselt, ohne Konto, ohne Werbung.";
-                                        color: #ffffffcc;
-                                        wrap: word-wrap;
-                                    }
-                                }
-                            }
-
-                            VerticalLayout {
-                                GroupTitle { title: "Verbindung"; description: "Adresse des Servers – im Heimnetz die IP des Server-PCs, sonst ein Hostname."; }
-                                BoxedList {
-                                    Row {
-                                        title: "Server";
-                                        has-icon: true;
-                                        icon: @image-url("../assets/icons/server.svg");
-                                        addr := Entry {
-                                            width: 300px;
-                                            text <=> root.address;
-                                            placeholder: "z. B. 192.168.1.20 oder voice.example.org";
-                                            enabled: root.conn-state == 0;
-                                            accepted => { root.connect(); }
-                                        }
-                                    }
-                                    Row {
-                                        title: "Dein Name";
-                                        has-icon: true;
-                                        icon: @image-url("../assets/icons/user-round.svg");
-                                        separator: false;
-                                        Entry {
-                                            width: 300px;
-                                            text <=> root.nick;
-                                            placeholder: "Wie sollen dich andere sehen?";
-                                            enabled: root.conn-state == 0;
-                                            accepted => { root.connect(); }
-                                        }
-                                    }
-                                }
-                            }
-
-                            if root.key-changed: Rectangle {
-                                border-radius: Theme.radius;
-                                background: #c01c2833;
-                                border-width: 1px;
-                                border-color: #ff7b6355;
-                                VerticalLayout {
-                                    padding: 18px;
-                                    spacing: 10px;
-                                    HorizontalLayout {
-                                        spacing: 10px;
-                                        Icon { source: @image-url("../assets/icons/shield-alert.svg"); tint: Theme.error; width: 22px; height: 22px; }
-                                        Text { color: Theme.text; text: "Die Identität dieses Servers hat sich geändert"; font-weight: 700; vertical-alignment: center; }
-                                    }
-                                    Text {
-                                        wrap: word-wrap;
-                                        color: #ffffffcc;
-                                        text: "Das passiert, wenn der Server neu aufgesetzt wurde – oder wenn sich jemand dazwischenschaltet. Frag beim Betreiber nach, ob der neue Fingerabdruck stimmt.";
-                                    }
-                                    Text { text: "Bisher:  " + root.key-old; font-family: "monospace"; font-size: Theme.font-small; color: Theme.text-dim; }
-                                    Text { text: "Jetzt:    " + root.key-new; font-family: "monospace"; font-size: Theme.font-small; color: Theme.error; }
-                                    HorizontalLayout {
-                                        alignment: end;
-                                        spacing: 8px;
-                                        Button { text: "Abbrechen"; clicked => { root.forget-error(); } }
-                                        Button { text: "Neuem Schlüssel vertrauen"; destructive: true; clicked => { root.trust-new-key(); } }
-                                    }
-                                }
-                            }
-
-                            if root.error-text != "" && !root.key-changed: Rectangle {
-                                border-radius: Theme.radius;
-                                background: #ff7b631f;
-                                HorizontalLayout {
-                                    padding: 14px;
-                                    spacing: 10px;
-                                    VerticalLayout {
-                                        alignment: center;
-                                        Icon { source: @image-url("../assets/icons/circle-alert.svg"); tint: Theme.error; }
-                                    }
-                                    Text { color: Theme.text; text: root.error-text; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; }
-                                }
-                            }
-
-                            HorizontalLayout {
-                                alignment: end;
-                                spacing: 8px;
-                                if root.conn-state == 1: Button { text: "Abbrechen"; clicked => { root.cancel(); } }
-                                Button {
-                                    text: root.conn-state == 1 ? "Verbinde …" : "Verbinden";
-                                    primary: true;
-                                    enabled: root.conn-state == 0;
-                                    min-width: 140px;
-                                    clicked => { root.connect(); }
-                                }
-                            }
-
-                            if root.recents.length > 0: VerticalLayout {
-                                GroupTitle { title: "Zuletzt verbunden"; }
-                                BoxedList {
-                                    for r[i] in root.recents: Row {
-                                        title: r.address;
-                                        subtitle: r.subtitle;
-                                        has-icon: true;
-                                        icon: @image-url("../assets/icons/radio-tower.svg");
-                                        activatable: root.conn-state == 0;
-                                        separator: i < root.recents.length - 1;
-                                        activated => { root.connect-recent(r.address); }
-                                        VerticalLayout {
-                                            alignment: center;
-                                            Icon { source: @image-url("../assets/icons/arrow-left.svg"); tint: Theme.text-faint; transform-rotation: 180deg; width: 16px; height: 16px; }
-                                        }
-                                    }
-                                }
-                            }
-
-                            Text {
-                                text: "Tidespeak " + root.version + " · QUIC + TLS 1.3 · Opus · RNNoise";
-                                color: Theme.text-faint;
-                                font-size: Theme.font-small;
-                                horizontal-alignment: center;
-                            }
-                        }
-                    }
-                }
-
-                // ─────────── Verbunden: Netz + Funkprotokoll
-                if root.conn-state == 2: HorizontalLayout {
-                    net-area := Rectangle {
-                        property <bool> compact: self.width < 780px;
-                        horizontal-stretch: 1;
-                        nv := NetView {
-                            channels: root.net-channels;
-                            users: root.net-users;
-                            server-name: root.server-name;
-                            pulse: root.pulse;
-                            extent-x: root.net-extent-x;
-                            extent-y: root.net-extent-y;
-                            card-index <=> root.card-index;
-                            card-volume <=> root.volume-value;
-                            card-loss: root.card-loss;
-                            card-buffer: root.card-buffer;
-                            card-jitter: root.card-jitter;
-                            card-tone: root.card-tone;
-                            join(id) => { root.join-channel(id); }
-                            user-clicked(id, name) => { root.open-user(id, name); }
-                            card-volume-moved(v) => { root.user-volume-moved(v); }
-                            card-volume-done() => { root.user-volume-done(); }
-                            card-poke() => { root.poke-user(""); }
-                        }
-
-                        // Hinweis oben links
-                        if !net-area.compact: MonoLabel {
-                            x: 24px;
-                            y: 18px;
-                            font-size: 9px;
-                            color: Theme.text-faint;
-                            text: "KANAL ANKLICKEN ZUM BEITRETEN · ZIEHEN ZUM VERSCHIEBEN · MAUSRAD ZOOMT";
-                        }
-
-                        // Eigener Bereich unten links (bei schmalem Fenster nur Avatar und Zahnrad)
-                        CutPanel {
-                            x: 24px;
-                            y: parent.height - self.height - 24px;
-                            width: net-area.compact ? 128px : 300px;
-                            height: 82px;
-                            cut: 12px;
-                            TouchArea { }
-                            HorizontalLayout {
-                                padding-left: 14px;
-                                padding-right: 14px;
-                                spacing: 12px;
-                                VerticalLayout {
-                                    alignment: center;
-                                    Rectangle {
-                                        width: 46px;
-                                        height: 46px;
-                                        border-radius: 23px;
-                                        border-width: 2px;
-                                        border-color: root.transmitting ? Theme.teal : root.muted || root.deafened ? Theme.destructive : transparent;
-                                        Rectangle {
-                                            width: 40px;
-                                            height: 40px;
-                                            border-radius: 20px;
-                                            background: root.me-color;
-                                            opacity: root.away ? 0.45 : 1.0;
-                                            Text { text: root.me-initial; color: #ffffff; font-weight: 700; font-size: 17px; }
-                                        }
-                                    }
-                                }
-                                if !net-area.compact: VerticalLayout {
-                                    alignment: center;
-                                    spacing: 5px;
-                                    horizontal-stretch: 1;
-                                    HorizontalLayout {
-                                        Text { text: root.nick; font-weight: 700; font-size: 15px; color: Theme.text; overflow: elide; horizontal-stretch: 1; }
-                                        MonoLabel {
-                                            letter-spacing: 1.2px;
-                                            text: root.transmitting ? "SENDET" : root.deafened ? "TON AUS" : root.muted ? "STUMM" : root.away ? "ABWESEND" : "BEREIT";
-                                            color: root.transmitting ? Theme.teal : root.deafened || root.muted ? Theme.error : root.away ? Theme.warning : Theme.success;
-                                        }
-                                    }
-                                    HorizontalLayout {
-                                        height: 6px;
-                                        spacing: 2px;
-                                        for i in 24: Rectangle {
-                                            horizontal-stretch: 1;
-                                            background: i < root.level * 24 ? (root.transmitting ? Theme.teal : Theme.success.transparentize(0.35)) : #ffffff1f;
-                                        }
-                                    }
-                                    MonoLabel {
-                                        font-size: 9px;
-                                        letter-spacing: 1.2px;
-                                        color: Theme.text-faint;
-                                        overflow: elide;
-                                        text: root.voice-mode == 0 ? "SPRACHAKTIVIERUNG · " + (root.auto-threshold ? "AUTO" : "MANUELL")
-                                            : root.voice-mode == 1 ? "PUSH-TO-TALK · " + root.ptt-key-name
-                                            : "DAUERHAFT SENDEN";
-                                    }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    DockButton {
-                                        size: 38px;
-                                        icon: @image-url("../assets/icons/settings.svg");
-                                        active: root.settings-open;
-                                        active-color: Theme.teal;
-                                        clicked => { root.toggle-settings(); }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Steuerleiste unten mittig
-                        CutPanel {
-                            x: Math.min(parent.width - self.width - 16px, Math.max(net-area.compact ? 168px : 340px, (parent.width - self.width) / 2));
-                            y: parent.height - self.height - 24px;
-                            width: dock.preferred-width;
-                            height: 60px;
-                            cut: 16px;
-                            arrow: true;
-                            fill: #303030f2;
-                            stroke: #22d3ee4d;
-                            TouchArea { }
-                            dock := HorizontalLayout {
-                                padding-left: 22px;
-                                padding-right: 22px;
-                                spacing: 10px;
-                                alignment: center;
-                                VerticalLayout {
-                                    alignment: center;
-                                    DockButton {
-                                        icon: root.muted ? @image-url("../assets/icons/mic-off.svg") : @image-url("../assets/icons/mic.svg");
-                                        active: root.muted;
-                                        clicked => { root.toggle-mute(); }
-                                    }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    DockButton {
-                                        icon: root.deafened ? @image-url("../assets/icons/headphone-off.svg") : @image-url("../assets/icons/headphones.svg");
-                                        active: root.deafened;
-                                        clicked => { root.toggle-deafen(); }
-                                    }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    DockButton {
-                                        icon: @image-url("../assets/icons/moon.svg");
-                                        active: root.away;
-                                        active-color: Theme.warning;
-                                        clicked => { root.toggle-away(); }
-                                    }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    DockButton {
-                                        icon: @image-url("../assets/icons/message-square.svg");
-                                        active: root.chat-open;
-                                        active-color: Theme.teal;
-                                        clicked => { root.chat-open = !root.chat-open; }
-                                    }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    DockButton {
-                                        icon: @image-url("../assets/icons/settings.svg");
-                                        active: root.settings-open;
-                                        active-color: Theme.teal;
-                                        clicked => { root.toggle-settings(); }
-                                    }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    Rectangle {
-                                        width: 56px;
-                                        height: 42px;
-                                        border-radius: 21px;
-                                        background: leave-ta.pressed ? #a51d2d : leave-ta.has-hover ? #d02535 : Theme.destructive;
-                                        leave-ta := TouchArea { mouse-cursor: pointer; clicked => { root.disconnect(); } }
-                                        Icon { source: @image-url("../assets/icons/phone-off.svg"); width: 18px; height: 18px; tint: #ffffff; }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Zoom
-                        VerticalLayout {
-                            x: parent.width - 36px - 20px;
-                            y: 16px;
-                            width: 36px;
-                            spacing: 6px;
-                            SquareButton { icon: @image-url("../assets/icons/plus.svg"); clicked => { nv.zoom = Math.min(2.2, nv.zoom * 1.2); } }
-                            SquareButton { icon: @image-url("../assets/icons/minus.svg"); clicked => { nv.zoom = Math.max(0.5, nv.zoom / 1.2); } }
-                            SquareButton {
-                                icon: @image-url("../assets/icons/locate-fixed.svg");
-                                clicked => { nv.zoom = 1.0; nv.pan-x = 0; nv.pan-y = 0; }
-                            }
-                        }
-                    }
-
-                    // Funkprotokoll (Text-Chat des Kanals)
-                    if root.chat-open: Rectangle {
-                        width: 340px;
-                        background: #242424f0;
-                        Rectangle { x: 0; width: 1px; background: #22d3ee33; }
-                        VerticalLayout {
-                            HorizontalLayout {
-                                padding-left: 18px;
-                                padding-right: 14px;
-                                padding-top: 16px;
-                                padding-bottom: 6px;
-                                spacing: 8px;
-                                VerticalLayout {
-                                    alignment: center;
-                                    Rectangle { width: 6px; height: 6px; border-radius: 3px; background: Theme.teal; }
-                                }
-                                MonoLabel { text: "FUNKPROTOKOLL · " + root.channel-code; horizontal-stretch: 1; overflow: elide; }
-                                RoundButton {
-                                    size: 24px;
-                                    icon-size: 11px;
-                                    icon: @image-url("../assets/icons/x.svg");
-                                    clicked => { root.chat-open = false; }
-                                }
-                            }
-                            chat := ScrollView {
-                                vertical-stretch: 1;
-                                content-width: self.visible-width;
-                                changed content-height => {
-                                    if (root.stick-bottom) {
-                                        self.content-y = min(0px, self.visible-height - self.content-height);
-                                    }
-                                }
-                                scrolled => {
-                                    root.stick-bottom = self.content-y <= self.visible-height - self.content-height + 40px;
-                                }
-                                VerticalLayout {
-                                    padding-bottom: 12px;
-                                    alignment: end;
-                                    if root.messages.length == 0: Text {
-                                        text: "// Noch keine Nachrichten in " + root.channel-name;
-                                        font-family: "JetBrains Mono";
-                                        font-size: 11px;
-                                        color: Theme.text-faint;
-                                        horizontal-alignment: center;
-                                    }
-                                    for m in root.messages: LogLine { msg: m; }
-                                }
-                            }
-                            HorizontalLayout {
-                                padding-left: 16px;
-                                padding-right: 16px;
-                                padding-bottom: 16px;
-                                padding-top: 6px;
-                                Rectangle {
-                                    height: 46px;
-                                    background: #303030;
-                                    border-width: 1px;
-                                    border-color: composer.has-focus ? #22d3eeaa : #22d3ee59;
-                                    HorizontalLayout {
-                                        padding-left: 14px;
-                                        padding-right: 6px;
-                                        spacing: 2px;
-                                        Text { text: ">"; font-family: "JetBrains Mono"; color: Theme.teal; vertical-alignment: center; }
-                                        composer := Entry {
-                                            height: 44px;
-                                            background: transparent;
-                                            border-width: 0px;
-                                            horizontal-stretch: 1;
-                                            placeholder: "Nachricht an " + root.channel-name;
-                                            accepted(t) => {
-                                                root.stick-bottom = true;
-                                                root.send-chat(t);
-                                                self.text = "";
-                                            }
-                                        }
-                                        VerticalLayout {
-                                            alignment: center;
-                                            RoundButton {
-                                                size: 34px;
-                                                icon-size: 16px;
-                                                icon: @image-url("../assets/icons/send-horizontal.svg");
-                                                tint: composer.text == "" ? Theme.text-faint : Theme.teal;
-                                                clicked => {
-                                                    root.stick-bottom = true;
-                                                    root.send-chat(composer.text);
-                                                    composer.text = "";
-                                                    composer.focus-input();
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            moved => { root.mouse("move", self.mouse-x, self.mouse-y); }
+            changed has-hover => {
+                if (!self.has-hover) { root.mouse("leave", 0, 0); }
             }
+            double-clicked => { root.mouse("double", self.mouse-x, self.mouse-y); }
+            scroll-event(e) => {
+                root.scrolled(self.mouse-x, self.mouse-y, e.delta-y);
+                return accept;
+            }
+        }
+        f0 := Field {
+            shown: root.shown0;
+            fx: root.x0;
+            fy: root.y0;
+            fw: root.w0;
+            text <=> root.text0;
+            edited => { root.field-edited(0, self.text); }
+            accepted => { root.field-accepted(0); }
+        }
+        f1 := Field {
+            shown: root.shown1;
+            fx: root.x1;
+            fy: root.y1;
+            fw: root.w1;
+            text <=> root.text1;
+            edited => { root.field-edited(1, self.text); }
+            accepted => { root.field-accepted(1); }
+        }
+        f2 := Field {
+            shown: root.shown2;
+            fx: root.x2;
+            fy: root.y2;
+            fw: root.w2;
+            text <=> root.text2;
+            edited => { root.field-edited(2, self.text); }
+            accepted => { root.field-accepted(2); }
         }
     }
 
-    // ─────────────────────────────────────────── Einstellungen (Schublade von rechts)
-    if root.settings-open: Rectangle {
-        y: root.header-h;
-        height: parent.height - root.header-h;
-        background: #0c0c0e9e;
-        TouchArea { clicked => { root.settings-open = false; } }
-    }
-    if root.settings-open: drawer := Rectangle {
-        property <[{code: string, name: string, title: string}]> tabs: [
-            { code: "01", name: "Audio", title: "Ein- und Ausgabe" },
-            { code: "02", name: "Sprache", title: "Sprachübertragung" },
-            { code: "03", name: "Klang", title: "Klang und Qualität" },
-            { code: "04", name: "Verbindung", title: "Verbindung" },
-            { code: "05", name: "Sicherheit", title: "Sicherheit" },
-        ];
-        x: parent.width - self.width;
-        y: root.header-h;
-        width: min(680px, parent.width - 40px);
-        height: parent.height - root.header-h;
-        background: #242426;
-        drop-shadow-blur: 60px;
-        drop-shadow-color: #0000008c;
-        TouchArea { }
-        HorizontalLayout {
-            // Kategorien
-            Rectangle {
-                width: 172px;
-                background: #1f1f21;
-                Rectangle { x: parent.width - 1px; width: 1px; background: #ffffff0f; }
-                VerticalLayout {
-                    padding-top: 20px;
-                    padding-bottom: 18px;
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    spacing: 4px;
-                    HorizontalLayout {
-                        padding-left: 8px;
-                        padding-bottom: 10px;
-                        MonoLabel { text: "EINSTELLUNGEN"; letter-spacing: 2px; }
-                    }
-                    for t[i] in drawer.tabs: Rectangle {
-                        height: 38px;
-                        border-radius: Theme.radius-small;
-                        background: root.settings-tab == i ? #22d3ee1f : tta.has-hover ? #ffffff0d : transparent;
-                        tta := TouchArea { mouse-cursor: pointer; clicked => { root.settings-tab = i; } }
-                        if root.settings-tab == i: Rectangle { x: 0; width: 2px; height: parent.height; background: Theme.teal; }
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 10px;
-                            spacing: 8px;
-                            MonoLabel {
-                                width: 22px;
-                                text: t.code;
-                                letter-spacing: 0px;
-                                color: root.settings-tab == i ? Theme.teal : Theme.text-faint;
-                            }
-                            Text {
-                                text: t.name;
-                                color: Theme.text;
-                                font-weight: root.settings-tab == i ? 700 : 400;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-                    Rectangle { vertical-stretch: 1; }
-                    HorizontalLayout {
-                        padding-left: 8px;
-                        MonoLabel { text: "TIDESPEAK " + root.version; font-size: 9px; letter-spacing: 1.2px; color: Theme.text-faint; }
-                    }
-                }
-            }
-            // Inhalt
-            VerticalLayout {
-                horizontal-stretch: 1;
-                padding-top: 20px;
-                padding-bottom: 16px;
-                spacing: 14px;
-                HorizontalLayout {
-                    padding-left: 22px;
-                    padding-right: 22px;
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        spacing: 2px;
-                        MonoLabel {
-                            text: drawer.tabs[root.settings-tab].code + " // " + drawer.tabs[root.settings-tab].name.to-uppercase();
-                            color: Theme.teal;
-                            letter-spacing: 2px;
-                        }
-                        Text { text: drawer.tabs[root.settings-tab].title; font-size: 20px; font-weight: 700; color: Theme.text; }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        Rectangle {
-                            width: 34px;
-                            height: 34px;
-                            border-radius: 17px;
-                            border-width: 1px;
-                            border-color: #ffffff1f;
-                            background: cta.has-hover ? #ffffff1a : #ffffff14;
-                            cta := TouchArea { mouse-cursor: pointer; clicked => { root.settings-open = false; } }
-                            Icon { source: @image-url("../assets/icons/x.svg"); width: 14px; height: 14px; }
-                        }
-                    }
-                }
-                ScrollView {
-                    vertical-stretch: 1;
-                    content-width: self.visible-width;
-                    VerticalLayout {
-                        padding-left: 22px;
-                        padding-right: 22px;
-                        padding-bottom: 12px;
-                        spacing: 20px;
-                        alignment: start;
-
-                        // ── 01 Audio
-                        if root.settings-tab == 0: Section {
-                            title: "AUSGABE";
-                            for d[i] in root.output-devices: Row {
-                                title: d.name;
-                                has-icon: true;
-                                icon: @image-url("../assets/icons/headphones.svg");
-                                activatable: true;
-                                activated => { root.select-output(i); }
-                                VerticalLayout { alignment: center; Radio { checked: d.selected; } }
-                            }
-                            if root.output-error != "": Row { title: root.output-error; dimmed: true; has-icon: true; icon: @image-url("../assets/icons/circle-alert.svg"); }
-                            Row {
-                                title: "Lautstärke";
-                                separator: false;
-                                Slider {
-                                    width: 200px;
-                                    value <=> root.output-volume;
-                                    released => { root.settings-changed(); }
-                                }
-                                Text { text: Math.round(root.output-volume * 200) + " %"; width: 48px; font-family: "JetBrains Mono"; font-size: 12px; color: Theme.text-dim; vertical-alignment: center; horizontal-alignment: right; }
-                            }
-                        }
-                        if root.settings-tab == 0: Section {
-                            title: "MIKROFON";
-                            for d[i] in root.input-devices: Row {
-                                title: d.name;
-                                has-icon: true;
-                                icon: @image-url("../assets/icons/mic.svg");
-                                activatable: true;
-                                activated => { root.select-input(i); }
-                                VerticalLayout { alignment: center; Radio { checked: d.selected; } }
-                            }
-                            if root.input-error != "": Row { title: root.input-error; dimmed: true; has-icon: true; icon: @image-url("../assets/icons/circle-alert.svg"); }
-                            VerticalLayout {
-                                padding: 14px;
-                                spacing: 8px;
-                                HorizontalLayout {
-                                    Text { text: "Pegel"; color: Theme.text; horizontal-stretch: 1; }
-                                    MonoLabel {
-                                        text: root.transmitting ? "SENDET" : root.mic-test ? "TEST LÄUFT" : "STILL";
-                                        color: root.transmitting ? Theme.success : Theme.text-dim;
-                                    }
-                                }
-                                LevelMeter {
-                                    level: root.level;
-                                    threshold: root.voice-mode == 0 ? (root.auto-threshold ? root.threshold-now : root.threshold) : -1;
-                                    active: root.transmitting || root.mic-test;
-                                }
-                                if root.input-info != "": MonoLabel { text: root.input-info; font-size: 9px; letter-spacing: 1px; color: Theme.text-faint; wrap: word-wrap; }
-                            }
-                            Rectangle { height: 1px; background: Theme.separator; }
-                            Row {
-                                title: "Automatische Lautstärke";
-                                subtitle: "Gleicht leise und laute Mikrofone aus – ideal für Audio-Interfaces und XLR.";
-                                VerticalLayout {
-                                    alignment: center;
-                                    Switch { checked <=> root.auto-gain; toggled => { root.settings-changed(); } }
-                                }
-                            }
-                            Row {
-                                title: "Verstärkung";
-                                Slider {
-                                    width: 200px;
-                                    value <=> root.input-gain;
-                                    released => { root.settings-changed(); }
-                                }
-                                Text { text: Math.round(root.input-gain * 400) + " %"; width: 48px; font-family: "JetBrains Mono"; font-size: 12px; color: Theme.text-dim; vertical-alignment: center; horizontal-alignment: right; }
-                            }
-                            Row {
-                                title: "Echo-Unterdrückung";
-                                subtitle: "Wichtig, wenn du Lautsprecher statt Kopfhörer nutzt.";
-                                VerticalLayout {
-                                    alignment: center;
-                                    Switch { checked <=> root.echo-cancel; toggled => { root.settings-changed(); } }
-                                }
-                            }
-                            Row {
-                                title: "Mikrofon testen";
-                                subtitle: "Du hörst dich selbst – so klingst du für andere.";
-                                separator: false;
-                                VerticalLayout {
-                                    alignment: center;
-                                    Switch { checked <=> root.mic-test; toggled => { root.settings-changed(); } }
-                                }
-                            }
-                        }
-
-                        // ── 02 Sprache
-                        if root.settings-tab == 1: Section {
-                            title: "WANN GESENDET WIRD";
-                            Row {
-                                title: "Sprachaktivierung";
-                                subtitle: "Sendet automatisch, sobald du sprichst.";
-                                activatable: true;
-                                activated => { root.voice-mode = 0; root.settings-changed(); }
-                                VerticalLayout { alignment: center; Radio { checked: root.voice-mode == 0; } }
-                            }
-                            if root.voice-mode == 0: VerticalLayout {
-                                padding: 14px;
-                                spacing: 10px;
-                                HorizontalLayout {
-                                    spacing: 10px;
-                                    VerticalLayout {
-                                        horizontal-stretch: 1;
-                                        spacing: 2px;
-                                        Text { text: "Empfindlichkeit"; color: Theme.text; }
-                                        Text {
-                                            text: root.auto-threshold ? "Automatisch an den Raum angepasst" : "Weiße Markierung = Schwelle";
-                                            color: Theme.text-dim;
-                                            font-size: Theme.font-small;
-                                        }
-                                    }
-                                    MonoLabel { text: "AUTO"; }
-                                    VerticalLayout {
-                                        alignment: center;
-                                        Switch { checked <=> root.auto-threshold; toggled => { root.settings-changed(); } }
-                                    }
-                                }
-                                Slider {
-                                    enabled: !root.auto-threshold;
-                                    value <=> root.threshold;
-                                    released => { root.settings-changed(); }
-                                }
-                                LevelMeter {
-                                    level: root.level;
-                                    threshold: root.auto-threshold ? root.threshold-now : root.threshold;
-                                    active: root.transmitting;
-                                }
-                            }
-                            Rectangle { height: 1px; background: Theme.separator; }
-                            Row {
-                                title: "Push-to-Talk";
-                                subtitle: "Sendet nur, solange " + root.ptt-key-name + " gedrückt ist.";
-                                activatable: true;
-                                activated => { root.voice-mode = 1; root.settings-changed(); }
-                                VerticalLayout { alignment: center; Radio { checked: root.voice-mode == 1; } }
-                            }
-                            if root.voice-mode == 1: VerticalLayout {
-                                padding-left: 14px;
-                                padding-right: 14px;
-                                padding-bottom: 14px;
-                                spacing: 8px;
-                                Text {
-                                    text: "Unter Windows systemweit, unter Linux solange Tidespeak im Vordergrund ist.";
-                                    color: Theme.text-dim;
-                                    font-size: Theme.font-small;
-                                    wrap: word-wrap;
-                                }
-                                HorizontalLayout {
-                                    spacing: 4px;
-                                    for k[i] in root.ptt-keys: Rectangle {
-                                        height: 30px;
-                                        horizontal-stretch: 1;
-                                        border-radius: 6px;
-                                        background: root.ptt-key-index == i ? Theme.accent : kta.has-hover ? #ffffff21 : #ffffff12;
-                                        kta := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => { root.ptt-key-index = i; root.settings-changed(); }
-                                        }
-                                        Text { color: Theme.text; text: k; font-family: "JetBrains Mono"; font-size: Theme.font-small; font-weight: 700; }
-                                    }
-                                }
-                            }
-                            Rectangle { height: 1px; background: Theme.separator; }
-                            Row {
-                                title: "Dauerhaft senden";
-                                subtitle: "Offenes Mikrofon – am besten mit Headset.";
-                                separator: false;
-                                activatable: true;
-                                activated => { root.voice-mode = 2; root.settings-changed(); }
-                                VerticalLayout { alignment: center; Radio { checked: root.voice-mode == 2; } }
-                            }
-                        }
-
-                        // ── 03 Klang
-                        if root.settings-tab == 2: Section {
-                            title: "MIKROFONSIGNAL";
-                            Row {
-                                title: "Hintergrundgeräusche entfernen";
-                                subtitle: "Filtert Tastatur, Lüfter und Rauschen (RNNoise, läuft lokal).";
-                                VerticalLayout {
-                                    alignment: center;
-                                    Switch { checked <=> root.noise-suppression; toggled => { root.settings-changed(); } }
-                                }
-                            }
-                            Row {
-                                title: "Echo-Unterdrückung";
-                                subtitle: "Verhindert, dass andere sich selbst hören.";
-                                VerticalLayout {
-                                    alignment: center;
-                                    Switch { checked <=> root.echo-cancel; toggled => { root.settings-changed(); } }
-                                }
-                            }
-                            Row {
-                                title: "Automatische Lautstärke";
-                                subtitle: "Hält deine Stimme gleichmäßig laut.";
-                                separator: false;
-                                VerticalLayout {
-                                    alignment: center;
-                                    Switch { checked <=> root.auto-gain; toggled => { root.settings-changed(); } }
-                                }
-                            }
-                        }
-                        if root.settings-tab == 2: Section {
-                            title: "SPRACHQUALITÄT";
-                            description: "Höhere Qualität braucht etwas mehr Bandbreite (32 / 64 / 96 kbit/s).";
-                            HorizontalLayout {
-                                padding: 12px;
-                                spacing: 6px;
-                                for q[i] in ["Sparsam", "Standard", "Hoch"]: Rectangle {
-                                    height: 34px;
-                                    horizontal-stretch: 1;
-                                    border-radius: 6px;
-                                    background: root.quality-index == i ? Theme.accent : qta.has-hover ? #ffffff21 : #ffffff12;
-                                    qta := TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => { root.quality-index = i; root.settings-changed(); }
-                                    }
-                                    Text { color: Theme.text; text: q; font-size: Theme.font-small; font-weight: 600; }
-                                }
-                            }
-                        }
-
-                        // ── 04 Verbindung
-                        if root.settings-tab == 3 && root.conn-state != 2: Text {
-                            text: "// Nicht verbunden – die Werte erscheinen, sobald du mit einem Server verbunden bist.";
-                            font-family: "JetBrains Mono";
-                            font-size: 11px;
-                            color: Theme.text-faint;
-                            wrap: word-wrap;
-                        }
-                        if root.settings-tab == 3 && root.conn-state == 2: Section {
-                            title: "LEITUNG";
-                            description: "Verlust bis 2 % ist unproblematisch – Tidespeak rekonstruiert fehlende Pakete. Darüber hilft meist ein LAN-Kabel statt WLAN.";
-                            Row {
-                                title: "Ping zum Server";
-                                Text {
-                                    text: root.ping-ms > 0 ? root.ping-ms + " ms" : "–";
-                                    font-family: "JetBrains Mono";
-                                    vertical-alignment: center;
-                                    color: root.ping-ms < 80 ? Theme.success : root.ping-ms < 150 ? Theme.warning : Theme.error;
-                                }
-                            }
-                            Row {
-                                title: "Empfang";
-                                subtitle: "Wie vollständig die Stimmen der anderen bei dir ankommen";
-                                Text {
-                                    text: Math.round(root.rx-loss * 10) / 10 + " %";
-                                    font-family: "JetBrains Mono";
-                                    vertical-alignment: center;
-                                    color: root.rx-loss < 2 ? Theme.success : root.rx-loss < 8 ? Theme.warning : Theme.error;
-                                }
-                            }
-                            Row {
-                                title: "Deine Stimme bei den anderen";
-                                subtitle: "Von den Zuhörern gemeldet – bei Verlust erhöht Tidespeak die Fehlerkorrektur";
-                                separator: false;
-                                Text {
-                                    text: root.tx-loss + " %";
-                                    font-family: "JetBrains Mono";
-                                    vertical-alignment: center;
-                                    color: root.tx-loss < 2 ? Theme.success : root.tx-loss < 8 ? Theme.warning : Theme.error;
-                                }
-                            }
-                        }
-
-                        // ── 05 Sicherheit
-                        if root.settings-tab == 4 && root.fingerprint == "": Text {
-                            text: "// Verbinde dich mit einem Server, um seinen Fingerabdruck zu sehen. Tidespeak merkt sich jeden Server beim ersten Besuch und warnt, wenn sich seine Identität ändert.";
-                            font-family: "JetBrains Mono";
-                            font-size: 11px;
-                            color: Theme.text-faint;
-                            wrap: word-wrap;
-                        }
-                        if root.settings-tab == 4 && root.fingerprint != "": Section {
-                            title: "FINGERABDRUCK DES SERVERS";
-                            description: "Vergleiche ihn mit der Anzeige des Servers – stimmen sie überein, bist du wirklich mit ihm verbunden.";
-                            HorizontalLayout {
-                                padding: 14px;
-                                spacing: 12px;
-                                VerticalLayout {
-                                    alignment: center;
-                                    Icon { source: @image-url("../assets/icons/shield-check.svg"); tint: Theme.teal; }
-                                }
-                                VerticalLayout {
-                                    spacing: 4px;
-                                    horizontal-stretch: 1;
-                                    Text { color: Theme.text; text: root.server-address; }
-                                    TextInput {
-                                        text: root.fingerprint;
-                                        read-only: true;
-                                        font-family: "JetBrains Mono";
-                                        font-size: 13px;
-                                        color: Theme.teal;
-                                        selection-background-color: Theme.accent.transparentize(0.4);
-                                    }
-                                }
-                            }
-                        }
-                        if root.settings-tab == 4: Section {
-                            title: "VERSCHLÜSSELUNG";
-                            Row { title: "Transport"; MonoLabel { text: "QUIC · TLS 1.3"; color: Theme.text; } }
-                            Row { title: "Konto"; separator: false; MonoLabel { text: "KEINS NÖTIG"; color: Theme.text; } }
-                        }
-                    }
-                }
-                HorizontalLayout {
-                    padding-left: 22px;
-                    padding-right: 22px;
-                    MonoLabel { text: "ÄNDERUNGEN WERDEN SOFORT ÜBERNOMMEN"; font-size: 9px; letter-spacing: 1.2px; color: Theme.text-faint; }
-                }
-            }
-        }
-        Rectangle { x: 0; width: 1px; background: #22d3ee59; }
-    }
-
-    // Hinweis-Banner (Anstupsen, Erwähnung)
-    if root.toast-title != "": CutPanel {
-        x: (parent.width - self.width) / 2;
-        y: root.header-h + 12px;
-        width: 440px;
-        height: toast.preferred-height;
-        cut: 12px;
-        fill: #1f3550f5;
-        stroke: Theme.accent;
-        toast := HorizontalLayout {
-            padding: 14px;
-            spacing: 12px;
-            VerticalLayout {
-                alignment: center;
-                Icon { source: @image-url("../assets/icons/bell-ring.svg"); tint: Theme.teal; width: 22px; height: 22px; }
-            }
-            VerticalLayout {
-                horizontal-stretch: 1;
-                spacing: 2px;
-                Text { text: root.toast-title; color: Theme.text; font-weight: 700; }
-                if root.toast-text != "": Text { text: root.toast-text; color: #ffffffcc; wrap: word-wrap; }
-            }
-            VerticalLayout {
-                alignment: start;
-                RoundButton {
-                    icon: @image-url("../assets/icons/x.svg");
-                    size: 24px;
-                    icon-size: 12px;
-                    clicked => { root.toast-title = ""; root.toast-text = ""; }
-                }
-            }
-        }
-    }
-
-    // Rahmen und Größenänderung (eigene Fensterdekoration)
-    if !root.is-maximized: Rectangle {
-        border-width: 1px;
-        border-color: Theme.border;
-    }
+    // Größe ändern (eigene Fensterdekoration)
     if !root.is-maximized: TouchArea {
-        x: 0; y: 6px; width: 5px; height: parent.height - 12px;
+        x: 0;
+        y: 6px;
+        width: 5px;
+        height: parent.height - 12px;
         mouse-cursor: ew-resize;
         pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(6); } }
     }
     if !root.is-maximized: TouchArea {
-        x: parent.width - 5px; y: 6px; width: 5px; height: parent.height - 12px;
+        x: parent.width - 5px;
+        y: 6px;
+        width: 5px;
+        height: parent.height - 12px;
         mouse-cursor: ew-resize;
         pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(2); } }
     }
     if !root.is-maximized: TouchArea {
-        x: 6px; y: 0; width: parent.width - 12px; height: 4px;
-        mouse-cursor: ns-resize;
-        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(0); } }
-    }
-    if !root.is-maximized: TouchArea {
-        x: 6px; y: parent.height - 5px; width: parent.width - 12px; height: 5px;
+        x: 6px;
+        y: parent.height - 5px;
+        width: parent.width - 12px;
+        height: 5px;
         mouse-cursor: ns-resize;
         pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(4); } }
     }
     if !root.is-maximized: TouchArea {
-        x: 0; y: 0; width: 8px; height: 8px;
-        mouse-cursor: nwse-resize;
-        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(7); } }
-    }
-    if !root.is-maximized: TouchArea {
-        x: parent.width - 8px; y: 0; width: 8px; height: 8px;
-        mouse-cursor: nesw-resize;
-        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(1); } }
-    }
-    if !root.is-maximized: TouchArea {
-        x: 0; y: parent.height - 8px; width: 8px; height: 8px;
-        mouse-cursor: nesw-resize;
-        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(5); } }
-    }
-    if !root.is-maximized: TouchArea {
-        x: parent.width - 8px; y: parent.height - 8px; width: 8px; height: 8px;
+        x: parent.width - 8px;
+        y: parent.height - 8px;
+        width: 8px;
+        height: 8px;
         mouse-cursor: nwse-resize;
         pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(3); } }
+    }
+    if !root.is-maximized: TouchArea {
+        x: 0;
+        y: parent.height - 8px;
+        width: 8px;
+        height: 8px;
+        mouse-cursor: nesw-resize;
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-resize(5); } }
     }
 
     init => { fs.focus(); }

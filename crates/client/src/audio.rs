@@ -20,6 +20,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use tidespeak_proto::{FRAME_SAMPLES, SAMPLE_RATE, VOICE_DOWN_HEADER, VOICE_FLAG_END};
 
+use crate::i18n::{l, lf};
 use crate::config::VoiceMode;
 use crate::dsp::{self, Agc, Biquad, ChannelPicker, SincResampler, VoiceGate};
 use crate::jitter::{JitterBuffer, Stats};
@@ -213,7 +214,13 @@ impl Audio {
             Cue::Mute => &[(311.13, 0.08)],
             Cue::Unmute => &[(466.16, 0.08)],
             Cue::Poke => &[(783.99, 0.07), (1046.5, 0.07), (1318.5, 0.12)],
+            Cue::Tick => &[(2093.0, 0.012)],
+            Cue::Beep => &[(1568.0, 0.05)],
+            Cue::Granted => &[(523.25, 0.06), (659.25, 0.06), (783.99, 0.06), (1046.5, 0.16)],
+            Cue::Alarm => &[(440.0, 0.12), (330.0, 0.12), (440.0, 0.12), (330.0, 0.16)],
+            Cue::Shutdown => &[(783.99, 0.07), (587.33, 0.07), (392.0, 0.07), (261.63, 0.18)],
         };
+        let quiet = matches!(cue, Cue::Tick);
         let mut samples = Vec::new();
         for &(freq, secs) in tones {
             let n = (secs * SAMPLE_RATE as f32) as usize;
@@ -221,7 +228,8 @@ impl Audio {
                 let t = i as f32 / SAMPLE_RATE as f32;
                 // weicher Ein-/Ausklang, damit es nicht klickt
                 let env = (i.min(n - i) as f32 / (0.008 * SAMPLE_RATE as f32)).min(1.0);
-                samples.push((t * freq * std::f32::consts::TAU).sin() * 0.12 * env);
+                let vol = if quiet { 0.05 } else { 0.12 };
+                samples.push((t * freq * std::f32::consts::TAU).sin() * vol * env);
             }
         }
         samples.resize(samples.len().div_ceil(FRAME_SAMPLES) * FRAME_SAMPLES, 0.0);
@@ -240,6 +248,12 @@ pub enum Cue {
     Unmute,
     /// Poked or mentioned
     Poke,
+    /// Terminal sounds: soft click, short beep, access granted, alarm, shutdown
+    Tick,
+    Beep,
+    Granted,
+    Alarm,
+    Shutdown,
 }
 
 /// Shows only devices that make sense to a person. With raw ALSA (no
@@ -362,9 +376,9 @@ fn open_input(
     mic_tx: &Sender<MicSource>,
     encoder: thread::Thread,
 ) -> Result<InputStream, String> {
-    let dev = find_device(host, name, true).ok_or("kein Mikrofon gefunden")?;
+    let dev = find_device(host, name, true).ok_or(l("kein Mikrofon gefunden", "no microphone found"))?;
     let ranges = dev.supported_input_configs().map(|r| r.collect()).unwrap_or_default();
-    let cfg = pick_config(ranges, dev.default_input_config().ok()).ok_or("Mikrofon ohne passendes Format")?;
+    let cfg = pick_config(ranges, dev.default_input_config().ok()).ok_or(l("Mikrofon ohne passendes Format", "microphone without a usable format"))?;
     let stream_cfg = cfg.config();
     let rate = stream_cfg.sample_rate;
     let channels = (stream_cfg.channels as usize).max(1);
@@ -410,9 +424,9 @@ where
 }
 
 fn open_output(host: &cpal::Host, name: Option<&str>, spk_tx: &Sender<SpeakerSink>) -> Result<OutputStream, String> {
-    let dev = find_device(host, name, false).ok_or("keine Audioausgabe gefunden")?;
+    let dev = find_device(host, name, false).ok_or(l("keine Audioausgabe gefunden", "no audio output found"))?;
     let ranges = dev.supported_output_configs().map(|r| r.collect()).unwrap_or_default();
-    let cfg = pick_config(ranges, dev.default_output_config().ok()).ok_or("Ausgabe ohne passendes Format")?;
+    let cfg = pick_config(ranges, dev.default_output_config().ok()).ok_or(l("Ausgabe ohne passendes Format", "output without a usable format"))?;
     let stream_cfg = cfg.config();
     let rate = stream_cfg.sample_rate;
     let channels = (stream_cfg.channels as usize).max(1);
@@ -806,7 +820,7 @@ fn encoder_thread(
         let ch = c.channel();
         if ch != shown_channel {
             shown_channel = ch;
-            let input = if ch.1 > 1 { format!("Eingang {} von {}", ch.0, ch.1) } else { "Mono".into() };
+            let input = if ch.1 > 1 { lf(format!("Eingang {} von {}", ch.0, ch.1), format!("input {} of {}", ch.0, ch.1)) } else { "Mono".into() };
             *shared.input_info.lock().unwrap() = format!("{} · {} · {}", m.name, rate_text(m.rate), input);
         }
     }

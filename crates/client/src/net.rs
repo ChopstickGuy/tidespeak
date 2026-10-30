@@ -10,6 +10,7 @@ use quinn::crypto::rustls::QuicClientConfig;
 use tidespeak_proto::*;
 use tokio::sync::mpsc;
 
+use crate::i18n::{l, lf};
 use crate::audio::Audio;
 use crate::tofu::TofuVerifier;
 
@@ -90,11 +91,11 @@ async fn run(audio: Arc<Audio>, mut cmds: mpsc::UnboundedReceiver<Command>, on_e
 fn resolve(address: &str) -> Result<SocketAddr, String> {
     let mut addrs: Vec<SocketAddr> = address
         .to_socket_addrs()
-        .map_err(|_| format!("Adresse „{address}“ nicht gefunden"))?
+        .map_err(|_| lf(format!("Adresse „{address}“ nicht gefunden"), format!("Address “{address}” not found")))?
         .collect();
     // IPv4 zuerst – funktioniert in Heimnetzen am zuverlässigsten
     addrs.sort_by_key(|a| a.is_ipv6());
-    addrs.into_iter().next().ok_or_else(|| format!("Adresse „{address}“ nicht gefunden"))
+    addrs.into_iter().next().ok_or_else(|| lf(format!("Adresse „{address}“ nicht gefunden"), format!("Address “{address}” not found")))
 }
 
 fn client_config(verifier: Arc<TofuVerifier>) -> Result<quinn::ClientConfig, String> {
@@ -163,14 +164,14 @@ async fn session(
     let ep = match quinn::Endpoint::client(bind) {
         Ok(e) => e,
         Err(e) => {
-            fail(format!("Netzwerk nicht verfügbar: {e}"));
+            fail(lf(format!("Netzwerk nicht verfügbar: {e}"), format!("Network not available: {e}")));
             return None;
         }
     };
     let connecting = match ep.connect_with(cfg, addr, "tidespeak") {
         Ok(c) => c,
         Err(e) => {
-            fail(format!("Verbindung nicht möglich: {e}"));
+            fail(lf(format!("Verbindung nicht möglich: {e}"), format!("Cannot connect: {e}")));
             return None;
         }
     };
@@ -182,15 +183,15 @@ async fn session(
             Ok(Err(e)) => {
                 match (&pinned, verifier.seen()) {
                     (Some(p), Some(now)) if !p.eq_ignore_ascii_case(&now) => on_event(Event::Failed {
-                        reason: "Die Identität des Servers hat sich geändert!".into(),
+                        reason: l("Die Identität des Servers hat sich geändert!", "The server identity has changed!").into(),
                         changed_key: Some((p.clone(), now)),
                     }),
-                    _ => fail(format!("Server nicht erreichbar ({e})")),
+                    _ => fail(lf(format!("Server nicht erreichbar ({e})"), format!("Server unreachable ({e})"))),
                 }
                 return None;
             }
             Err(_) => {
-                fail("Server antwortet nicht. Läuft der Server, ist UDP-Port 9987 freigegeben?".into());
+                fail(l("Server antwortet nicht. Läuft der Server, ist UDP-Port 9987 freigegeben?", "The server does not answer. Is it running, and is UDP port 9987 open?").into());
                 return None;
             }
         },
@@ -215,7 +216,7 @@ async fn session(
     let welcome = match tokio::time::timeout(Duration::from_secs(8), read_msg::<_, ServerMsg>(&mut recv)).await {
         Ok(Ok(Some(m))) => m,
         Ok(Ok(None)) | Err(_) => {
-            fail("Server hat nicht geantwortet".into());
+            fail(l("Server hat nicht geantwortet", "The server did not answer").into());
             return None;
         }
         Ok(Err(e)) => {
@@ -241,7 +242,7 @@ async fn session(
             return None;
         }
         _ => {
-            fail("Unerwartete Antwort vom Server".into());
+            fail(l("Unerwartete Antwort vom Server", "Unexpected answer from the server").into());
             return None;
         }
     };
@@ -290,7 +291,7 @@ async fn session(
                     ServerMsg::Rejected { reason } => break reason,
                     ServerMsg::Welcome { .. } => {}
                 },
-                Ok(None) => break "Der Server hat die Verbindung beendet.".to_string(),
+                Ok(None) => break l("Der Server hat die Verbindung beendet.", "The server closed the connection.").to_string(),
                 Err(_) => break close_reason(&conn),
             },
             d = conn.read_datagram() => match d {
@@ -325,9 +326,9 @@ async fn session(
 
 fn close_reason(conn: &quinn::Connection) -> String {
     match conn.close_reason() {
-        Some(quinn::ConnectionError::TimedOut) => "Verbindung zum Server verloren (Zeitüberschreitung).".into(),
-        Some(quinn::ConnectionError::ApplicationClosed(_)) => "Der Server wurde beendet.".into(),
-        Some(e) => format!("Verbindung getrennt: {e}"),
-        None => "Verbindung getrennt.".into(),
+        Some(quinn::ConnectionError::TimedOut) => l("Verbindung zum Server verloren (Zeitüberschreitung).", "Lost the connection to the server (timeout).").into(),
+        Some(quinn::ConnectionError::ApplicationClosed(_)) => l("Der Server wurde beendet.", "The server was shut down.").into(),
+        Some(e) => lf(format!("Verbindung getrennt: {e}"), format!("Disconnected: {e}")),
+        None => l("Verbindung getrennt.", "Disconnected.").into(),
     }
 }

@@ -848,6 +848,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "core_maths"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77745e017f5edba1a9c1d854f6f3a52dac8a12dd5af5d2f54aecf61e43d80d30"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "coreaudio-rs"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1475,6 +1484,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fontdue"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e796cb6894e6418daacea84b28dd4f98d3b32c74d5bb452ba1ecfbf5ad8e84ca"
+dependencies = [
+ "hashbrown 0.15.5",
+ "ttf-parser",
+]
+
+[[package]]
 name = "fontique"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1872,6 +1891,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -5090,13 +5111,14 @@ dependencies = [
 
 [[package]]
 name = "tidespeak"
-version = "3.3.0"
+version = "4.0.0"
 dependencies = [
  "bytes",
  "chrono",
  "cpal",
  "directories",
  "env_logger",
+ "fontdue",
  "log",
  "nnnoiseless",
  "opus",
@@ -5107,6 +5129,7 @@ dependencies = [
  "slint",
  "slint-build",
  "sonora",
+ "sys-locale",
  "tidespeak-proto",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -5116,7 +5139,7 @@ dependencies = [
 
 [[package]]
 name = "tidespeak-proto"
-version = "3.3.0"
+version = "4.0.0"
 dependencies = [
  "postcard",
  "serde",
@@ -5126,7 +5149,7 @@ dependencies = [
 
 [[package]]
 name = "tidespeak-server"
-version = "3.3.0"
+version = "4.0.0"
 dependencies = [
  "bytes",
  "env_logger",
@@ -5411,6 +5434,9 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
+dependencies = [
+ "core_maths",
+]
 
 [[package]]
 name = "typed-index-collections"

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/proto", "crates/server", "crates/client"]
 
 [workspace.package]
-version = "3.3.0"
+version = "4.0.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/ChopstickGuy/tidespeak"

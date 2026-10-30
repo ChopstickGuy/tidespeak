@@ -4,50 +4,89 @@
 
 # Tidespeak
 
-**Lightweight, encrypted voice and text chat for Linux and Windows, styled after Frametide OS.**
+**Encrypted voice and text chat for Linux and Windows – with an interface made entirely of characters.**
 
-No account, no ads, no tracking. Start a server, enter its address, start talking.
+No account, no ads, no tracking. Start a server, enter its address, and watch the connection come up like in a spy movie.
 
 </div>
 
-<img src="docs/screenshots/network.png" alt="Tidespeak network view: the server in the middle, channels as hexagons, people as nodes around them, the channel log on the right">
+<img src="docs/screenshots/network.png" alt="Tidespeak network view in ASCII: the server as a rolling wave in the middle, channels as hexagons, people as boxes, the radio log on the right">
 
-## The network view
+## The ASCII interface
 
-Tidespeak 3.3 drops the usual sidebar-and-list layout. Your server is shown as a **network**: the server core sits in
-the middle, every channel is a hexagon connected to it, and every person is a node attached to their channel. Your own
-channel is the large one on the left, the others share the right-hand side, so you see at a glance who is where.
+Tidespeak 4.0 draws its whole interface as a character grid – frames, hexagons, lines and a 3D wave made of
+characters – in the Frametide colours (teal, purple, blue on near-black). It stays readable and calm in everyday use,
+and turns into an action-movie terminal at the moments that matter: start, connect, switching channels, leaving.
 
-- **Talking is visible:** when someone speaks, their node glows teal, the ring grows with their voice and small data
-  packets run along the line to the channel. Muted people get a red ring, away people fade out, a weak connection
-  turns the line amber.
-- **Join with one click** on any channel hexagon (`BEITRETEN ›`). Drag the background to pan, use the mouse wheel or
-  the `+` / `−` buttons to zoom, and the target button to recenter.
-- **Person card:** click someone to open a card with their live reception values (loss, buffer, jitter), a volume
-  slider just for you, **Anstupsen** (poke) and **Für mich stumm** (mute for me).
-- **Your own panel** (bottom left) shows your status, a live mic meter and your transmit mode, with a gear for the
-  settings. The **control dock** in the middle holds mic, headphones, away, channel log, settings and leave.
-- **Funkprotokoll** (channel log) on the right: the text chat of your channel in a terminal style, with history and
-  highlighted `@mentions`. It can be hidden from the dock.
-- **Settings as a drawer** from the right, reachable from the header, the dock and your own panel at any time, also
-  before connecting. Categories: Audio, Sprache (transmit mode), Klang (sound), Verbindung (connection), Sicherheit
-  (security). Changes apply immediately. `Esc` closes the drawer or the person card.
-- Fits small windows: below a certain width your own panel shrinks to avatar and gear.
+### In the channel
+
+- **The network:** your server is the core in the middle – a **3D wave of characters** that keeps rolling slowly. Every
+  channel is a hexagon connected to it, every person a box connected to their channel. Your own channel is large on
+  the left, the others share the right-hand side.
+- **Who talks:** a speaker's box gets a glowing double frame `╔═══╗`, the line to the channel lights up, and a small
+  **oscilloscope** `▁▃▅▇▅▃` runs next to the name while they speak. Muted people are red, away people fade out, a
+  weak connection shows as `WEAK LINK`.
+- **Join a channel** with one click on its hexagon. A wireframe prism flies to the centre, and a scan line rebuilds the
+  network around your new channel.
+- **Person card:** click someone for their live reception values (loss, buffer, jitter), a volume slider just for you,
+  **Poke** (a packet `◆` flies to them and their box flashes) and **Mute for me**.
+- **Radio log** on the right: the text chat of your channel. New messages arrive **encrypted-looking and decrypt**
+  in front of you; your own messages type themselves out.
+- **New contact acquired:** when someone joins your channel, crosshair corners close in on their box. When someone
+  leaves, their box **dissolves into falling particles**.
+- **Priority messages:** an `@YourName` mention or a poke opens a flashing red banner (Esc or click to dismiss), plays a
+  sound and asks the taskbar for attention.
+- **Briefing:** the server's welcome message types itself out in a briefing box when you arrive.
+- **Dock and own panel:** mic, sound, away, chat, settings and leave in a hexagonal dock; your status, transmit mode
+  and settings button bottom left.
+
+<img src="docs/screenshots/alerts.png" alt="A new person is acquired by crosshair corners, a priority message flashes, the person card is open">
+
+### Sequences
+
+| | |
+|---|---|
+| **Start** | A boot log types out (audio device, Opus, QUIC/TLS), the wave forms out of single points and rolls high, `TIDESPEAK` appears in big block letters, then the wave settles and the connect screen scans in. |
+| **Connect** | The screen breaks into noise, packet dumps race down both sides, the command line types itself, a packet runs along the route to the server, five handshake bars fill up (address, QUIC, TLS 1.3, ALPN, protocol), the **real server fingerprint** locks in character by character, the sign-in types out – and `A C C E S S   G R A N T E D` flashes before the network scans in. The full sequence plays on the first visit of a server (when its fingerprint is saved); known servers get a 1.5-second version. It never waits artificially: it holds at the handshake until the server really answered, and a click or Esc skips it. |
+| **Leave** | A red alert frame flashes, five steps are ticked off (leave channel, stop audio, close QUIC, discard session keys, clear session data), key material burns away `█▓░`, the route retracts back to you, `D I S C O N N E C T E D` – then a red edge wipes back to the connect screen. A lost connection plays the same sequence with the reason. |
+| **Quit** | The network goes dark, the wave runs faster and flattens, the picture collapses like an old tube screen into a line and a dot, a tiny wave spins away – `SEE YOU SOON`. |
+
+Everything shown in the sequences is what Tidespeak really does at that moment – it looks like a movie, but it is
+not made up. Every animation can be switched off on its own in the settings.
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/person-card.png" alt="Person card with reception values, volume and poke"><p align="center"><sub>Person card</sub></p></td>
-<td width="50%"><img src="docs/screenshots/settings.png" alt="Settings drawer"><p align="center"><sub>Settings drawer</sub></p></td>
+<td width="50%"><img src="docs/screenshots/start.png" alt="Start sequence"><p align="center"><sub>Start</sub></p></td>
+<td width="50%"><img src="docs/screenshots/connect.png" alt="Connect screen"><p align="center"><sub>Connect screen</sub></p></td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/screenshots/connect.png" alt="Connect page"><p align="center"><sub>Connect</sub></p></td>
-<td width="50%"></td>
+<td width="50%"><img src="docs/screenshots/sequence.png" alt="Connection sequence: route, handshake, fingerprint"><p align="center"><sub>Connection sequence</sub></p></td>
+<td width="50%"><img src="docs/screenshots/access-granted.png" alt="Access granted"><p align="center"><sub>Access granted</sub></p></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/settings.png" alt="Settings drawer"><p align="center"><sub>Settings drawer</sub></p></td>
+<td width="50%"><img src="docs/screenshots/disconnect.png" alt="Disconnect sequence"><p align="center"><sub>Leaving a server</sub></p></td>
 </tr>
 </table>
 
+### Settings
+
+A drawer slides in from the right (header, dock or own panel; Esc closes it) with six categories: **Audio**, **Voice**,
+**Sound**, **Connection**, **Security** and **General**. Switches tick through `[·] [+] [*] [x]`, sliders glide to their
+new value, and every change is applied at once and confirmed with a short typed message. In **Security** you can
+confirm a server's fingerprint by hand – it decrypts, gets framed and stamped `[ VERIFIED ]`.
+
+**Animations and sounds** (Settings → Sound): terminal sounds (quiet clicks and beeps), the moving server wave,
+connection sequence, start and quit, join and leave, channel switch – each can be switched off.
+
+### Language
+
+Tidespeak is in **English** by default and switches to **German** automatically when the operating system is set to
+German. You can also pick English or German by hand under Settings → General; it applies immediately.
+
 ## Features
 
-- **Voice channels** like TeamSpeak, shown as a live network (see above).
+- **Voice channels** like TeamSpeak, shown as a live network.
 - **Text chat per channel** with history, so people who join later see recent messages.
 - **Three transmit modes:** voice activation (sensitivity automatic or manual), push-to-talk (F2 to F9, with a short
   release delay so the last syllable isn't cut), or always on.
@@ -57,23 +96,20 @@ channel is the large one on the left, the others share the right-hand side, so y
   tamed. Tidespeak also detects which input of an interface actually has the mic on it.
 - **Robust over the internet:** an adaptive jitter buffer per speaker, Opus error correction that gets stronger
   automatically when listeners report packet loss, and concealment for anything that still goes missing.
-- **Volume per person,** remembered by name, and **mute for me** for a single person.
-- **Away status, pokes and mentions:** set yourself away (moon), poke someone, and get a notice and a sound when
-  someone writes `@YourName`.
-- **Connection info:** ping in the header, plus incoming loss and how well your own voice arrives at the others.
-- **Mute and deafen** with one click, plus quiet sounds when people join or leave.
-- **Mic test**, device selection, input gain and output volume.
-
-The interface is currently in German.
+- **Volume per person**, remembered by name, and **mute for me** for a single person.
+- **Away status, pokes and mentions** with priority banners and sounds.
+- **Trust on first use:** every server's fingerprint is saved on the first visit. If it ever changes, the connection is
+  refused before anything is sent and a red alert explains what happened; only you can decide to trust the new key.
+- **Connection info:** ping in the header, incoming loss and how well your own voice arrives at the others.
 
 ## Quick start
 
 1. Download the package for your system from **Releases** and extract it.
 2. Start the **server**: `tidespeak-server` (Windows: `tidespeak-server.exe`).
    It prints its address and its **fingerprint**. Allow UDP port **9987** in your firewall.
-3. Start **Tidespeak**, enter the server address and your name, and click **Verbinden** (Connect).
+3. Start **Tidespeak**, enter the server address and your name, and click **» CONNECT**.
 4. On the first connection Tidespeak remembers the server's fingerprint. Compare it once with what the server prints.
-   If it ever changes, the app warns you.
+   If it ever changes, the app raises an alert.
 
 On Linux, `./install.sh` in the extracted folder adds Tidespeak to the app menu (no root needed).
 
@@ -106,7 +142,7 @@ IPv6 address (allow UDP 9987 for IPv6 in the router). Alternatives: Tailscale/Ze
 - **Audio interface / XLR mic:** set the gain on the interface so that normal speech lights up the green LED, not
   just barely. Automatic mic level does the rest. Tidespeak picks the input the mic is plugged into by itself.
 - **Use headphones,** so your speakers don't feed back into your mic.
-- **Wired beats Wi-Fi.** Under Settings → Verbindung you can see the loss for both directions. Up to about 2 % is
+- **Wired beats Wi-Fi.** Under Settings → Connection you can see the loss for both directions. Up to about 2 % is
   inaudible thanks to error correction.
 
 ## How it works
@@ -120,12 +156,14 @@ IPv6 address (allow UDP 9987 for IPv6 in the router). Alternatives: Tailscale/Ze
 | **Mic chain** | active-channel detection, band-limited (Kaiser-windowed sinc) resampling, 80 Hz high-pass, automatic gain, RNNoise, voice activation with hysteresis and 60 ms pre-roll so word beginnings aren't cut |
 | **Noise filter** | nnnoiseless (RNNoise in Rust); its speech probability also drives voice activation, so typing alone doesn't open the mic |
 | **Echo cancellation** | sonora (pure-Rust port of WebRTC's AEC3); in tests it removes 44 dB of echo and leaves your own voice almost untouched (-0.5 dB) |
-| **Interface** | Slint: native, no browser engine, software rendering. The network layout is computed in Rust, Slint draws it with paths and handles zoom and panning |
+| **Interface** | A character grid drawn in Rust: glyphs from JetBrains Mono (rasterised with fontdue), frame, line and block characters drawn as exact shapes so they join seamlessly. Only changed cells are redrawn, and only changed tiles of the picture are handed to the window (Slint, software rendering, no browser engine). Real text fields from Slint sit exactly on the grid, so paste, selection and input methods work |
+| **Language** | English by default, German when the system is German (sys-locale), switchable at runtime |
 | **Audio devices** | cpal: PipeWire/PulseAudio and ALSA on Linux, WASAPI on Windows |
 
-**Lightweight:** the client uses about 25–35 MB of RAM and under 1 % of one CPU core while idle. While someone in your
-channel is talking, it uses about 5 % of one core in total, mostly for redrawing the animated network view (the
-animation is tied to the 80 ms UI tick instead of running at 60 fps, which halves that cost). Talking yourself costs about 4.6 % of one CPU core
+**Lightweight:** the client uses about 50 MB of RAM. With the rolling server wave and someone talking in your channel it
+needs about 4 % of one CPU core in total – including receiving, decoding and mixing the voice. The everyday animations
+(wave, oscilloscope) run at about 8 frames per second and only touch the part of the picture that changes; the
+sequences run at 25–40 frames per second for a few seconds. Talking yourself costs about 4.6 % of one CPU core
 for the whole mic chain (resampling, echo cancellation, noise filter, automatic gain, Opus), and each person you hear
 adds about 0.15 %. In a test with 40 participants and five people talking at once, the server used about 7 MB of RAM
 and roughly 15 % of one core. It never decodes Opus, it only forwards packets to everyone in the same channel.
@@ -151,8 +189,10 @@ and hear the content, just like with TeamSpeak or Discord, so it should run on a
 **Known limits:**
 - On Linux, push-to-talk only works while the Tidespeak window has focus, because Wayland doesn't allow global
   hotkeys without extra work. Voice activation works everywhere. On Windows, push-to-talk works system-wide.
-- Server and clients must use the same protocol version. 3.3 only changes the interface, so 3.3 clients work with 3.2
-  servers and the other way round. Clients older than 3.2 get a clear message.
+- Server and clients must use the same protocol version. 4.0 only changes the client, so 4.0 clients work with 3.2 and
+  3.3 servers and the other way round. Clients older than 3.2 get a clear message.
+- The window needs at least 1360 × 720 pixels, so the network and the radio log fit side by side.
+- Channel pan and zoom from 3.3 are gone: the network now always fits the window.
 - The Windows GUI hasn't been tested on real hardware yet. The Windows build and tests pass in CI.
 
 ## Building from source
@@ -172,10 +212,15 @@ send chat messages and report what it receives, which makes it useful for load t
 
 ## History
 
+- **4.0** – the ASCII interface: character-grid renderer, network view, sequences for start, connect, leave and quit,
+  English/German.
+- **3.3** – network view with Slint widgets. **3.2** – call view, echo cancellation, away and pokes.
+  **3.1** – audio quality and internet robustness. **3.0** – rewrite in Rust.
+
 This repository started as **ASM-Speak**, a voice and text chat written entirely in x64 assembly for Windows. That
 version is still available in the git history and as release
 [v2.0](https://github.com/ChopstickGuy/tidespeak/releases/tag/v2.0).
 
 ## License
 
-GPL-3.0-or-later. Fonts: Inter and JetBrains Mono (both SIL Open Font License). Icons: Lucide (ISC).
+GPL-3.0-or-later. Font: JetBrains Mono (SIL Open Font License).
