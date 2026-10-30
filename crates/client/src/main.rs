@@ -52,9 +52,10 @@ struct State {
     /// Person whose volume is currently being adjusted
     volume_target: Option<(u32, String)>,
     messages: Rc<VecModel<MessageItem>>,
-    channel_model: Rc<VecModel<ChannelItem>>,
-    /// Tiles of the people in the current channel
-    voice_model: Rc<VecModel<UserItem>>,
+    /// Network view: channels and people as positioned nodes
+    net_channels: Rc<VecModel<NetChannel>>,
+    net_users: Rc<VecModel<NetUser>>,
+    window: slint::Weak<MainWindow>,
     /// Current loudness (rounded) and connection quality per person
     levels: HashMap<u32, f32>,
     quality: HashMap<u32, i32>,
@@ -142,11 +143,11 @@ fn main() {
     });
 
     let messages = Rc::new(VecModel::<MessageItem>::default());
-    let channel_model = Rc::new(VecModel::<ChannelItem>::default());
-    let voice_model = Rc::new(VecModel::<UserItem>::default());
-    window.set_voice_users(ModelRc::from(voice_model.clone()));
+    let net_channels = Rc::new(VecModel::<NetChannel>::default());
+    let net_users = Rc::new(VecModel::<NetUser>::default());
     window.set_messages(ModelRc::from(messages.clone()));
-    window.set_channels(ModelRc::from(channel_model.clone()));
+    window.set_net_channels(ModelRc::from(net_channels.clone()));
+    window.set_net_users(ModelRc::from(net_users.clone()));
 
     // Einstellungen ins Fenster
     window.set_version(env!("CARGO_PKG_VERSION").into());
@@ -183,8 +184,9 @@ fn main() {
             output_names: Vec::new(),
             volume_target: None,
             messages,
-            channel_model,
-            voice_model,
+            net_channels,
+            net_users,
+            window: window.as_weak(),
             levels: HashMap::new(),
             quality: HashMap::new(),
             toast_gen: 0,
@@ -413,10 +415,8 @@ fn wire_callbacks(window: &MainWindow, audio: &Arc<Audio>, net_tx: &UnboundedSen
                 s.volume_target = Some((id as u32, name.to_string()));
                 s.cfg.user_volumes.get(name.as_str()).copied().unwrap_or(1.0)
             });
-            w.set_volume_name(name);
             w.set_volume_value(gain / 2.0);
-            w.set_volume_stats(volume_stats(&audio, id as u32).into());
-            w.set_volume_open(true);
+            update_card(&w, &audio);
         });
     }
     {
@@ -515,14 +515,28 @@ fn wire_callbacks(window: &MainWindow, audio: &Arc<Audio>, net_tx: &UnboundedSen
     });
 }
 
-fn volume_stats(audio: &Audio, id: u32) -> String {
-    match audio.shared.rx.lock().unwrap().get(&id) {
-        Some(r) => format!(
-            "Empfang: {:.1} % Verlust · Schwankung {:.0} ms · Puffer {:.0} ms",
-            r.loss, r.jitter_ms, r.buffer_ms
+/// Reception values for the person card in the network view
+fn update_card(w: &MainWindow, audio: &Audio) {
+    let Some((id, _)) = with_state(|s| s.volume_target.clone()) else { return };
+    let (loss, buffer, jitter, tone) = match audio.shared.rx.lock().unwrap().get(&id) {
+        Some(r) => (
+            format!("{:.1} %", r.loss).replace('.', ","),
+            format!("{:.0} ms", r.buffer_ms),
+            format!("{:.0} ms", r.jitter_ms),
+            if r.loss < 3.0 { 0 } else if r.loss < 10.0 { 1 } else { 2 },
         ),
-        None => "Noch keine Sprachdaten empfangen.".into(),
+        None => ("–".into(), "–".into(), "–".into(), 0),
+    };
+    if w.get_card_loss() != loss.as_str() {
+        w.set_card_loss(loss.into());
     }
+    if w.get_card_buffer() != buffer.as_str() {
+        w.set_card_buffer(buffer.into());
+    }
+    if w.get_card_jitter() != jitter.as_str() {
+        w.set_card_jitter(jitter.into());
+    }
+    w.set_card_tone(tone);
 }
 
 /// Saved volumes (by name) for everyone who is currently online
@@ -608,13 +622,18 @@ fn refresh_devices(w: &MainWindow, audio: &Audio) {
 fn tick(w: &MainWindow, audio: &Audio) {
     let transmitting = audio.shared.transmitting.load(Ordering::Relaxed);
     w.set_transmitting(transmitting);
-    if w.get_volume_open() {
-        if let Some((id, _)) = with_state(|s| s.volume_target.clone()) {
-            w.set_volume_stats(volume_stats(audio, id).into());
+    if w.get_card_index() >= 0 {
+        update_card(w, audio);
+    }
+    let settings = w.get_settings_open();
+    if settings || w.get_conn_state() == 2 {
+        // Pegel in Schritten der Anzeige (24 Segmente), damit nicht ständig neu gezeichnet wird
+        let level = (audio.shared.level() * 48.0).round() / 48.0;
+        if w.get_level() != level {
+            w.set_level(level);
         }
     }
-    if w.get_page() == 2 {
-        w.set_level(audio.shared.level());
+    if settings {
         let info = audio.shared.input_info.lock().unwrap().clone();
         if w.get_input_info() != info.as_str() {
             w.set_input_info(info.into());
@@ -650,6 +669,9 @@ fn tick(w: &MainWindow, audio: &Audio) {
         .map(|(id, r)| (*id, if r.loss < 3.0 { 0 } else if r.loss < 10.0 { 1 } else { 2 }))
         .collect();
     let uplink = audio.shared.uplink_loss.load(Ordering::Relaxed);
+    if speaking.iter().any(|id| with_state(|s| s.users.get(id).is_some_and(|u| u.channel == s.current))) {
+        w.set_pulse((w.get_pulse() + 0.09) % 1.0);
+    }
     let changed = with_state(|s| {
         if s.you != 0 {
             if transmitting {
@@ -671,60 +693,198 @@ fn tick(w: &MainWindow, audio: &Audio) {
 
 fn refresh_channels() {
     with_state(|s| {
-        let items: Vec<ChannelItem> = s
+        let current = s.channels.iter().position(|c| c.id == s.current).unwrap_or(0);
+        let mut members: Vec<Vec<&UserInfo>> = s
             .channels
             .iter()
             .map(|c| {
-                let mut users: Vec<&UserInfo> = s.users.values().filter(|u| u.channel == c.id).collect();
-                users.sort_by_key(|u| u.name.to_lowercase());
-                let users: Vec<UserItem> = users.into_iter().map(|u| user_item(s, u)).collect();
-                ChannelItem {
+                let mut v: Vec<&UserInfo> = s.users.values().filter(|u| u.channel == c.id).collect();
+                // du zuerst, dann alphabetisch
+                v.sort_by_key(|u| (u.id != s.you, u.name.to_lowercase()));
+                v
+            })
+            .collect();
+        let counts: Vec<usize> = members.iter().map(|m| m.len()).collect();
+        let layout = net_layout(&counts, current);
+
+        let chans: Vec<NetChannel> = s
+            .channels
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let (x, y, r) = layout.channels[i];
+                NetChannel {
                     id: c.id as i32,
+                    code: channel_code(i).into(),
                     name: c.name.clone().into(),
-                    current: c.id == s.current,
-                    users: ModelRc::new(VecModel::from(users)),
+                    x,
+                    y,
+                    r,
+                    count: counts[i] as i32,
+                    current: i == current,
                 }
             })
             .collect();
-        // Modell an Ort und Stelle aktualisieren statt neu zu setzen – kein Flackern
-        if s.channel_model.row_count() == items.len() {
-            for (i, it) in items.into_iter().enumerate() {
-                s.channel_model.set_row_data(i, it);
+        let mut people = Vec::new();
+        for (i, list) in members.iter_mut().enumerate() {
+            let channel = layout.channels[i];
+            for (k, u) in list.iter().enumerate() {
+                let (x, y) = layout.users[i][k];
+                people.push(net_user(s, u, (x, y), channel, &channel_code(i), i == current));
             }
-        } else {
-            s.channel_model.set_vec(items);
         }
+        sync_model(&s.net_channels, chans);
 
-        // Kacheln im Sprachkanal: du zuerst, dann alphabetisch
-        let mut here: Vec<&UserInfo> = s.users.values().filter(|u| u.channel == s.current).collect();
-        here.sort_by_key(|u| (u.id != s.you, u.name.to_lowercase()));
-        let tiles: Vec<UserItem> = here.into_iter().map(|u| user_item(s, u)).collect();
-        if s.voice_model.row_count() == tiles.len() {
-            for (i, t) in tiles.into_iter().enumerate() {
-                if s.voice_model.row_data(i).as_ref() != Some(&t) {
-                    s.voice_model.set_row_data(i, t);
-                }
+        // Karte bleibt bei derselben Person, auch wenn sich die Reihenfolge ändert
+        let card_id = s.volume_target.as_ref().map(|t| t.0 as i32);
+        let card_index = card_id.and_then(|id| people.iter().position(|p| p.id == id));
+        sync_model(&s.net_users, people);
+        if let Some(w) = s.window.upgrade() {
+            w.set_net_extent_x(layout.extent.0);
+            w.set_net_extent_y(layout.extent.1);
+            if w.get_card_index() >= 0 {
+                w.set_card_index(card_index.map(|i| i as i32).unwrap_or(-1));
             }
-        } else {
-            s.voice_model.set_vec(tiles);
         }
     });
 }
 
-fn user_item(s: &State, u: &UserInfo) -> UserItem {
-    UserItem {
+/// Update a model in place instead of replacing it – no flicker, unchanged rows stay untouched
+fn sync_model<T: Clone + PartialEq + 'static>(model: &VecModel<T>, items: Vec<T>) {
+    if model.row_count() == items.len() {
+        for (i, it) in items.into_iter().enumerate() {
+            if model.row_data(i).as_ref() != Some(&it) {
+                model.set_row_data(i, it);
+            }
+        }
+    } else {
+        model.set_vec(items);
+    }
+}
+
+fn channel_code(index: usize) -> String {
+    format!("CH-{:02}", index + 1)
+}
+
+fn net_user(s: &State, u: &UserInfo, (x, y): (f32, f32), (cx, cy, cr): (f32, f32, f32), chan: &str, near: bool) -> NetUser {
+    let speaking = s.speaking.contains(&u.id);
+    let quality = s.quality.get(&u.id).copied().unwrap_or(0);
+    let me = u.id == s.you;
+    let status = if u.deafened {
+        "TON AUS"
+    } else if u.muted {
+        "STUMM"
+    } else if speaking && quality == 2 {
+        "SPRICHT · SCHWACH"
+    } else if speaking {
+        "SPRICHT"
+    } else if u.away {
+        "ABWESEND"
+    } else if quality == 2 {
+        "SCHWACHE VERB."
+    } else if me {
+        "DU"
+    } else {
+        ""
+    };
+    NetUser {
         id: u.id as i32,
         name: u.name.clone().into(),
         initial: initial(&u.name),
         color: avatar_color(&u.name),
-        speaking: s.speaking.contains(&u.id),
+        x,
+        y,
+        cx,
+        cy,
+        cr,
+        speaking,
         muted: u.muted,
         deafened: u.deafened,
-        me: u.id == s.you,
         away: u.away,
+        me,
         level: s.levels.get(&u.id).copied().unwrap_or(0.0),
-        quality: s.quality.get(&u.id).copied().unwrap_or(0),
+        quality,
+        status: status.into(),
+        chan: chan.into(),
+        near,
     }
+}
+
+/// Positions in the network view, in units (1.0 ≈ half the shorter side of the view).
+/// The server sits in the middle; your channel is large on the left, the others share
+/// the arc on the right. People are arranged around their channel, facing away from the server.
+struct NetLayout {
+    /// x, y, radius per channel
+    channels: Vec<(f32, f32, f32)>,
+    /// x, y per person, per channel
+    users: Vec<Vec<(f32, f32)>>,
+    /// half width and height needed to show everything
+    extent: (f32, f32),
+}
+
+fn net_layout(counts: &[usize], current: usize) -> NetLayout {
+    use std::f32::consts::PI;
+    let n = counts.len();
+    let others = n.saturating_sub(1).max(1) as f32;
+    let span = 210f32.to_radians();
+    // Abstand so wählen, dass benachbarte Kanäle sich nicht überlappen
+    let dist_others = (0.24 / (span / others / 2.0).sin()).max(0.7);
+    let mut channels: Vec<(f32, f32, f32)> = Vec::with_capacity(n);
+    let mut users: Vec<Vec<(f32, f32)>> = Vec::with_capacity(n);
+    let mut j = 0.0;
+    for (i, &m) in counts.iter().enumerate() {
+        let near = i == current;
+        let (angle, dist, r) = if near {
+            (PI, 0.62, 0.2)
+        } else {
+            let a = PI + 75f32.to_radians() + (j + 0.5) * span / others;
+            j += 1.0;
+            (a, dist_others, 0.13)
+        };
+        let (cx, cy) = (dist * angle.cos(), dist * angle.sin());
+        channels.push((cx, cy, r));
+        let (ring, step, max_span) = if near {
+            ((0.47 + 0.012 * m.saturating_sub(8) as f32).min(0.62), 36f32, 280f32)
+        } else {
+            (0.36, 30f32, 160f32)
+        };
+        let arc = (m.saturating_sub(1) as f32 * step).min(max_span).to_radians();
+        users.push(
+            (0..m)
+                .map(|k| {
+                    let t = if m > 1 { k as f32 / (m - 1) as f32 - 0.5 } else { 0.0 };
+                    let a = angle + t * arc;
+                    (cx + ring * a.cos(), cy + ring * a.sin())
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    // Rahmen um alles (Beschriftungen unter den Knoten eingerechnet) und mittig ausrichten
+    let (mut x0, mut x1, mut y0, mut y1) = (-0.25f32, 0.25f32, -0.25f32, 0.25f32);
+    for &(x, y, r) in &channels {
+        let r = r.max(0.18);
+        x0 = x0.min(x - r);
+        x1 = x1.max(x + r);
+        y0 = y0.min(y - r);
+        y1 = y1.max(y + r);
+    }
+    for &(x, y) in users.iter().flatten() {
+        x0 = x0.min(x - 0.22);
+        x1 = x1.max(x + 0.22);
+        y0 = y0.min(y - 0.12);
+        y1 = y1.max(y + 0.24);
+    }
+    let (mx, my) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    for c in &mut channels {
+        c.0 -= mx;
+        c.1 -= my;
+    }
+    for u in users.iter_mut().flatten() {
+        u.0 -= mx;
+        u.1 -= my;
+    }
+    let extent = (((x1 - x0) / 2.0).max(1.0) + 0.05, ((y1 - y0) / 2.0).max(1.0) + 0.05);
+    NetLayout { channels, users, extent }
 }
 
 fn my_name(s: &State) -> String {
@@ -822,6 +982,10 @@ fn channel_name(s: &State, id: u32) -> String {
     s.channels.iter().find(|c| c.id == id).map(|c| c.name.clone()).unwrap_or_default()
 }
 
+fn channel_code_of(s: &State, id: u32) -> String {
+    channel_code(s.channels.iter().position(|c| c.id == id).unwrap_or(0))
+}
+
 fn on_event(w: &MainWindow, ev: Event) {
     match ev {
         Event::Connecting => {
@@ -850,10 +1014,11 @@ fn on_event(w: &MainWindow, ev: Event) {
             w.set_server_name(server_name.clone().into());
             w.set_server_address(address.clone().into());
             w.set_fingerprint(fingerprint_short(&fingerprint).into());
-            w.set_page(1);
+            w.set_card_index(-1);
             with_state(|s| {
                 let ch = s.current;
                 w.set_channel_name(channel_name(s, ch).into());
+                w.set_channel_code(channel_code_of(s, ch).into());
                 w.set_online_count(s.users.len() as i32);
                 rebuild_messages(s);
                 if !motd.is_empty() {
@@ -878,7 +1043,6 @@ fn on_event(w: &MainWindow, ev: Event) {
         }
         Event::Failed { reason, changed_key } => {
             w.set_conn_state(0);
-            w.set_page(if w.get_page() == 2 { 2 } else { 0 });
             w.set_error_text(reason.into());
             if let Some((old, new)) = changed_key {
                 w.set_key_old(fingerprint_short(&old).into());
@@ -892,19 +1056,17 @@ fn on_event(w: &MainWindow, ev: Event) {
             w.set_ping_ms(0);
             w.set_tx_loss(0);
             w.set_rx_loss(0.0);
-            w.set_volume_open(false);
+            w.set_card_index(-1);
             w.set_away(false);
-            with_state(|s| s.voice_model.set_vec(Vec::new()));
-            if w.get_page() == 1 {
-                w.set_page(0);
-            }
             w.set_error_text(reason.into());
             w.set_fingerprint("".into());
             with_state(|s| {
                 s.users.clear();
                 s.channels.clear();
                 s.you = 0;
-                s.channel_model.set_vec(Vec::new());
+                s.volume_target = None;
+                s.net_channels.set_vec(Vec::new());
+                s.net_users.set_vec(Vec::new());
             });
         }
         Event::UserJoined(u) => {
@@ -930,6 +1092,7 @@ fn on_event(w: &MainWindow, ev: Event) {
                 if u.id == s.you && moved {
                     s.current = u.channel;
                     w.set_channel_name(channel_name(s, u.channel).into());
+                    w.set_channel_code(channel_code_of(s, u.channel).into());
                     rebuild_messages(s);
                     return Some(Cue::Join);
                 }

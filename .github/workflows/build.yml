@@ -28,6 +28,8 @@ jobs:
           mkdir -p dist/tidespeak
           cp target/release/tidespeak target/release/tidespeak-server dist/tidespeak/
           cp packaging/linux/tidespeak.desktop packaging/linux/install.sh crates/client/assets/tidespeak.svg README.md LICENSE dist/tidespeak/
+          cp crates/client/assets/fonts/OFL.txt dist/tidespeak/OFL-Inter.txt
+          cp crates/client/assets/fonts/OFL-JetBrainsMono.txt dist/tidespeak/
           tar -C dist -czf tidespeak-linux-x86_64.tar.gz tidespeak
       - uses: actions/upload-artifact@v4
         with:
@@ -49,6 +51,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/Tidespeak | Out-Null
           Copy-Item target/release/tidespeak.exe, target/release/tidespeak-server.exe, README.md, LICENSE dist/Tidespeak/
+          Copy-Item crates/client/assets/fonts/OFL.txt dist/Tidespeak/OFL-Inter.txt
+          Copy-Item crates/client/assets/fonts/OFL-JetBrainsMono.txt dist/Tidespeak/
           Compress-Archive -Path dist/Tidespeak -DestinationPath tidespeak-windows-x86_64.zip
       - uses: actions/upload-artifact@v4
         with:

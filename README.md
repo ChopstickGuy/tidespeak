@@ -10,14 +10,44 @@ No account, no ads, no tracking. Start a server, enter its address, start talkin
 
 </div>
 
-<img src="docs/screenshots/voice.png" alt="Tidespeak voice channel with participant tiles, chat and a poke notification">
+<img src="docs/screenshots/network.png" alt="Tidespeak network view: the server in the middle, channels as hexagons, people as nodes around them, the channel log on the right">
+
+## The network view
+
+Tidespeak 3.3 drops the usual sidebar-and-list layout. Your server is shown as a **network**: the server core sits in
+the middle, every channel is a hexagon connected to it, and every person is a node attached to their channel. Your own
+channel is the large one on the left, the others share the right-hand side, so you see at a glance who is where.
+
+- **Talking is visible:** when someone speaks, their node glows teal, the ring grows with their voice and small data
+  packets run along the line to the channel. Muted people get a red ring, away people fade out, a weak connection
+  turns the line amber.
+- **Join with one click** on any channel hexagon (`BEITRETEN ›`). Drag the background to pan, use the mouse wheel or
+  the `+` / `−` buttons to zoom, and the target button to recenter.
+- **Person card:** click someone to open a card with their live reception values (loss, buffer, jitter), a volume
+  slider just for you, **Anstupsen** (poke) and **Für mich stumm** (mute for me).
+- **Your own panel** (bottom left) shows your status, a live mic meter and your transmit mode, with a gear for the
+  settings. The **control dock** in the middle holds mic, headphones, away, channel log, settings and leave.
+- **Funkprotokoll** (channel log) on the right: the text chat of your channel in a terminal style, with history and
+  highlighted `@mentions`. It can be hidden from the dock.
+- **Settings as a drawer** from the right, reachable from the header, the dock and your own panel at any time, also
+  before connecting. Categories: Audio, Sprache (transmit mode), Klang (sound), Verbindung (connection), Sicherheit
+  (security). Changes apply immediately. `Esc` closes the drawer or the person card.
+- Fits small windows: below a certain width your own panel shrinks to avatar and gear.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/person-card.png" alt="Person card with reception values, volume and poke"><p align="center"><sub>Person card</sub></p></td>
+<td width="50%"><img src="docs/screenshots/settings.png" alt="Settings drawer"><p align="center"><sub>Settings drawer</sub></p></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/connect.png" alt="Connect page"><p align="center"><sub>Connect</sub></p></td>
+<td width="50%"></td>
+</tr>
+</table>
 
 ## Features
 
-- **Voice channels** like TeamSpeak. Channels are listed on the left with the people in them.
-- **Clear call view** like Discord: everyone in your channel as a tile with a big avatar. A teal ring grows with the
-  speaker's voice, badges show muted, deafened and away, and a dot warns about a bad connection. The grid adapts to
-  the window and the number of people. A control bar sits below it, and the channel chat can be shown or hidden.
+- **Voice channels** like TeamSpeak, shown as a live network (see above).
 - **Text chat per channel** with history, so people who join later see recent messages.
 - **Three transmit modes:** voice activation (sensitivity automatic or manual), push-to-talk (F2 to F9, with a short
   release delay so the last syllable isn't cut), or always on.
@@ -27,19 +57,12 @@ No account, no ads, no tracking. Start a server, enter its address, start talkin
   tamed. Tidespeak also detects which input of an interface actually has the mic on it.
 - **Robust over the internet:** an adaptive jitter buffer per speaker, Opus error correction that gets stronger
   automatically when listeners report packet loss, and concealment for anything that still goes missing.
-- **Volume per person:** click a name or tile to make someone louder or quieter, just for you.
-- **Away status, pokes and mentions:** set yourself away (moon), poke someone with a short message, and get a notice
-  and a sound when someone writes `@YourName`.
-- **Connection info:** ping, incoming loss, and how well your own voice arrives at the others.
+- **Volume per person,** remembered by name, and **mute for me** for a single person.
+- **Away status, pokes and mentions:** set yourself away (moon), poke someone, and get a notice and a sound when
+  someone writes `@YourName`.
+- **Connection info:** ping in the header, plus incoming loss and how well your own voice arrives at the others.
 - **Mute and deafen** with one click, plus quiet sounds when people join or leave.
-- **Mic test**, device selection, input gain and output volume, laid out like the Frametide audio page.
-
-<table>
-<tr>
-<td width="50%"><img src="docs/screenshots/connect.png" alt="Connect"><p align="center"><sub>Connect</sub></p></td>
-<td width="50%"><img src="docs/screenshots/settings.png" alt="Settings"><p align="center"><sub>Settings</sub></p></td>
-</tr>
-</table>
+- **Mic test**, device selection, input gain and output volume.
 
 The interface is currently in German.
 
@@ -97,10 +120,12 @@ IPv6 address (allow UDP 9987 for IPv6 in the router). Alternatives: Tailscale/Ze
 | **Mic chain** | active-channel detection, band-limited (Kaiser-windowed sinc) resampling, 80 Hz high-pass, automatic gain, RNNoise, voice activation with hysteresis and 60 ms pre-roll so word beginnings aren't cut |
 | **Noise filter** | nnnoiseless (RNNoise in Rust); its speech probability also drives voice activation, so typing alone doesn't open the mic |
 | **Echo cancellation** | sonora (pure-Rust port of WebRTC's AEC3); in tests it removes 44 dB of echo and leaves your own voice almost untouched (-0.5 dB) |
-| **Interface** | Slint: native, no browser engine, software rendering |
+| **Interface** | Slint: native, no browser engine, software rendering. The network layout is computed in Rust, Slint draws it with paths and handles zoom and panning |
 | **Audio devices** | cpal: PipeWire/PulseAudio and ALSA on Linux, WASAPI on Windows |
 
-**Lightweight:** the client uses about 25–30 MB of RAM and almost no CPU while idle or listening. Talking costs about 4.6 % of one CPU core
+**Lightweight:** the client uses about 25–35 MB of RAM and under 1 % of one CPU core while idle. While someone in your
+channel is talking, it uses about 5 % of one core in total, mostly for redrawing the animated network view (the
+animation is tied to the 80 ms UI tick instead of running at 60 fps, which halves that cost). Talking yourself costs about 4.6 % of one CPU core
 for the whole mic chain (resampling, echo cancellation, noise filter, automatic gain, Opus), and each person you hear
 adds about 0.15 %. In a test with 40 participants and five people talking at once, the server used about 7 MB of RAM
 and roughly 15 % of one core. It never decodes Opus, it only forwards packets to everyone in the same channel.
@@ -126,7 +151,8 @@ and hear the content, just like with TeamSpeak or Discord, so it should run on a
 **Known limits:**
 - On Linux, push-to-talk only works while the Tidespeak window has focus, because Wayland doesn't allow global
   hotkeys without extra work. Voice activation works everywhere. On Windows, push-to-talk works system-wide.
-- Server and clients must use the same version (3.2 changed the protocol). An older client gets a clear message.
+- Server and clients must use the same protocol version. 3.3 only changes the interface, so 3.3 clients work with 3.2
+  servers and the other way round. Clients older than 3.2 get a clear message.
 - The Windows GUI hasn't been tested on real hardware yet. The Windows build and tests pass in CI.
 
 ## Building from source
@@ -148,8 +174,8 @@ send chat messages and report what it receives, which makes it useful for load t
 
 This repository started as **ASM-Speak**, a voice and text chat written entirely in x64 assembly for Windows. That
 version is still available in the git history and as release
-[v2.0](https://github.com/ChopstickGuy/asmspeak/releases/tag/v2.0).
+[v2.0](https://github.com/ChopstickGuy/tidespeak/releases/tag/v2.0).
 
 ## License
 
-GPL-3.0-or-later. Font: Inter (SIL Open Font License). Icons: Lucide (ISC).
+GPL-3.0-or-later. Fonts: Inter and JetBrains Mono (both SIL Open Font License). Icons: Lucide (ISC).

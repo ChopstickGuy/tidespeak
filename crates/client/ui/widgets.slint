@@ -395,3 +395,63 @@ export component CornerMask inherits Rectangle {
     border-width: 10px;
     border-color: root.outside;
 }
+
+// Fläche mit abgeschrägten Ecken (oben links, unten rechts) – das Markenzeichen der Netz-Ansicht
+export component CutPanel inherits Rectangle {
+    in property <length> cut: 12px;
+    in property <color> fill: #2b2b2df2;
+    in property <color> stroke: #ffffff1a;
+    // true: beide Seiten spitz zulaufend (Steuerleiste)
+    in property <bool> arrow: false;
+    property <float> w: self.width / 1px - 0.5;
+    property <float> h: self.height / 1px - 0.5;
+    property <float> c: self.cut / 1px;
+    Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: parent.width / 1px;
+        viewbox-height: parent.height / 1px;
+        fill: root.fill;
+        stroke: root.stroke;
+        stroke-width: 1px;
+        commands: root.arrow
+            ? "M " + root.c + " 0.5 L " + (root.w - root.c) + " 0.5 L " + root.w + " " + (root.h / 2) + " L " + (root.w - root.c) + " " + root.h + " L " + root.c + " " + root.h + " L 0.5 " + (root.h / 2) + " Z"
+            : "M " + root.c + " 0.5 L " + root.w + " 0.5 L " + root.w + " " + (root.h - root.c) + " L " + (root.w - root.c) + " " + root.h + " L 0.5 " + root.h + " L 0.5 " + root.c + " Z";
+    }
+    @children
+}
+
+// Kleiner Text in Monospace-Großbuchstaben (Beschriftungen, Status)
+export component MonoLabel inherits Text {
+    font-family: "JetBrains Mono";
+    font-size: 10px;
+    letter-spacing: 1.6px;
+    color: Theme.text-dim;
+    vertical-alignment: center;
+}
+
+// Runder Knopf mit Rahmen für Dock und Panels
+export component DockButton inherits Rectangle {
+    in property <image> icon;
+    in property <bool> active;
+    in property <color> active-color: Theme.error;
+    in property <length> size: 42px;
+    callback clicked();
+    width: root.size;
+    height: root.size;
+    border-radius: root.size / 2;
+    border-width: 1px;
+    border-color: root.active ? root.active-color.transparentize(0.4) : #ffffff1f;
+    background: root.active ? root.active-color.transparentize(0.78)
+        : ta.pressed ? #ffffff26 : ta.has-hover ? #ffffff1a : #ffffff0f;
+    animate background { duration: 100ms; }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    Icon {
+        source: root.icon;
+        width: root.size * 0.43;
+        height: root.size * 0.43;
+        tint: root.active ? root.active-color : Theme.text;
+    }
+}
