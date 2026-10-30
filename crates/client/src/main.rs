@@ -53,6 +53,12 @@ struct State {
     volume_target: Option<(u32, String)>,
     messages: Rc<VecModel<MessageItem>>,
     channel_model: Rc<VecModel<ChannelItem>>,
+    /// Tiles of the people in the current channel
+    voice_model: Rc<VecModel<UserItem>>,
+    /// Current loudness (rounded) and connection quality per person
+    levels: HashMap<u32, f32>,
+    quality: HashMap<u32, i32>,
+    toast_gen: u64,
 }
 
 #[derive(Clone)]
@@ -106,6 +112,8 @@ fn audio_settings(cfg: &Config) -> AudioSettings {
         activation_threshold: cfg.activation_threshold,
         noise_suppression: cfg.noise_suppression,
         agc: cfg.auto_gain,
+        echo_cancel: cfg.echo_cancel,
+        auto_threshold: cfg.auto_threshold,
         bitrate: cfg.opus_bitrate,
         ptt_key: PTT_KEYS[ptt].2,
     }
@@ -135,6 +143,8 @@ fn main() {
 
     let messages = Rc::new(VecModel::<MessageItem>::default());
     let channel_model = Rc::new(VecModel::<ChannelItem>::default());
+    let voice_model = Rc::new(VecModel::<UserItem>::default());
+    window.set_voice_users(ModelRc::from(voice_model.clone()));
     window.set_messages(ModelRc::from(messages.clone()));
     window.set_channels(ModelRc::from(channel_model.clone()));
 
@@ -148,6 +158,8 @@ fn main() {
     window.set_voice_mode(cfg.voice_mode.index());
     window.set_noise_suppression(cfg.noise_suppression);
     window.set_auto_gain(cfg.auto_gain);
+    window.set_echo_cancel(cfg.echo_cancel);
+    window.set_auto_threshold(cfg.auto_threshold);
     window.set_quality_index(BITRATES.iter().position(|b| *b == cfg.opus_bitrate).unwrap_or(1) as i32);
     let keys: Vec<SharedString> = PTT_KEYS.iter().map(|k| k.0.into()).collect();
     window.set_ptt_keys(ModelRc::new(VecModel::from(keys)));
@@ -172,6 +184,10 @@ fn main() {
             volume_target: None,
             messages,
             channel_model,
+            voice_model,
+            levels: HashMap::new(),
+            quality: HashMap::new(),
+            toast_gen: 0,
         })
     });
     refresh_me(&window);
@@ -361,6 +377,8 @@ fn wire_callbacks(window: &MainWindow, audio: &Arc<Audio>, net_tx: &UnboundedSen
                 c.voice_mode = VoiceMode::from_index(w.get_voice_mode());
                 c.noise_suppression = w.get_noise_suppression();
                 c.auto_gain = w.get_auto_gain();
+                c.echo_cancel = w.get_echo_cancel();
+                c.auto_threshold = w.get_auto_threshold();
                 c.opus_bitrate = BITRATES[(w.get_quality_index().max(0) as usize).min(2)];
                 c.ptt_key = key.0.to_string();
                 c.save();
@@ -418,6 +436,29 @@ fn wire_callbacks(window: &MainWindow, audio: &Arc<Audio>, net_tx: &UnboundedSen
         });
     }
     window.on_user_volume_done(|| with_state(|s| s.cfg.save()));
+
+    // ── Abwesend / Anstupsen
+    {
+        let weak = window.as_weak();
+        let tx = net_tx.clone();
+        let audio = audio.clone();
+        window.on_toggle_away(move || {
+            let Some(w) = weak.upgrade() else { return };
+            w.set_away(!w.get_away());
+            apply_mute(&w, &audio, &tx);
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let tx = net_tx.clone();
+        window.on_poke_user(move |text| {
+            let Some(w) = weak.upgrade() else { return };
+            if let Some((id, name)) = with_state(|s| s.volume_target.clone()) {
+                let _ = tx.send(Command::Poke { target: id, text: text.trim().to_string() });
+                show_toast(&w, format!("{name} angestupst"), String::new());
+            }
+        });
+    }
 
     // ── Fenster (eigene Kopfleiste)
     {
@@ -501,7 +542,7 @@ fn apply_mute(w: &MainWindow, audio: &Audio, tx: &UnboundedSender<Command>) {
     if was != muted {
         audio.cue(if muted { Cue::Mute } else { Cue::Unmute });
     }
-    let _ = tx.send(Command::State { muted, deafened });
+    let _ = tx.send(Command::State { muted, deafened, away: w.get_away() });
 }
 
 fn start_connect(w: &MainWindow, tx: &UnboundedSender<Command>, forced_address: Option<String>) {
@@ -597,16 +638,31 @@ fn tick(w: &MainWindow, audio: &Audio) {
         .filter(|(_, t)| now.duration_since(**t) < Duration::from_millis(350))
         .map(|(id, _)| *id)
         .collect();
+    let round = |x: f32| (x * 10.0).round() / 10.0;
+    let mut levels: HashMap<u32, f32> =
+        audio.shared.rx_level.lock().unwrap().iter().map(|(id, l)| (*id, round(*l))).collect();
+    let mut quality: HashMap<u32, i32> = audio
+        .shared
+        .rx
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, r)| (*id, if r.loss < 3.0 { 0 } else if r.loss < 10.0 { 1 } else { 2 }))
+        .collect();
+    let uplink = audio.shared.uplink_loss.load(Ordering::Relaxed);
     let changed = with_state(|s| {
-        if transmitting && s.you != 0 {
-            speaking.insert(s.you);
+        if s.you != 0 {
+            if transmitting {
+                speaking.insert(s.you);
+                levels.insert(s.you, round(audio.shared.level()));
+            }
+            quality.insert(s.you, if uplink < 3 { 0 } else if uplink < 10 { 1 } else { 2 });
         }
-        if speaking != s.speaking {
-            s.speaking = speaking;
-            true
-        } else {
-            false
-        }
+        let changed = speaking != s.speaking || levels != s.levels || quality != s.quality;
+        s.speaking = speaking;
+        s.levels = levels;
+        s.quality = quality;
+        changed
     });
     if changed {
         refresh_channels();
@@ -621,19 +677,7 @@ fn refresh_channels() {
             .map(|c| {
                 let mut users: Vec<&UserInfo> = s.users.values().filter(|u| u.channel == c.id).collect();
                 users.sort_by_key(|u| u.name.to_lowercase());
-                let users: Vec<UserItem> = users
-                    .into_iter()
-                    .map(|u| UserItem {
-                        id: u.id as i32,
-                        name: u.name.clone().into(),
-                        initial: initial(&u.name),
-                        color: avatar_color(&u.name),
-                        speaking: s.speaking.contains(&u.id),
-                        muted: u.muted,
-                        deafened: u.deafened,
-                        me: u.id == s.you,
-                    })
-                    .collect();
+                let users: Vec<UserItem> = users.into_iter().map(|u| user_item(s, u)).collect();
                 ChannelItem {
                     id: c.id as i32,
                     name: c.name.clone().into(),
@@ -650,10 +694,77 @@ fn refresh_channels() {
         } else {
             s.channel_model.set_vec(items);
         }
+
+        // Kacheln im Sprachkanal: du zuerst, dann alphabetisch
+        let mut here: Vec<&UserInfo> = s.users.values().filter(|u| u.channel == s.current).collect();
+        here.sort_by_key(|u| (u.id != s.you, u.name.to_lowercase()));
+        let tiles: Vec<UserItem> = here.into_iter().map(|u| user_item(s, u)).collect();
+        if s.voice_model.row_count() == tiles.len() {
+            for (i, t) in tiles.into_iter().enumerate() {
+                if s.voice_model.row_data(i).as_ref() != Some(&t) {
+                    s.voice_model.set_row_data(i, t);
+                }
+            }
+        } else {
+            s.voice_model.set_vec(tiles);
+        }
     });
 }
 
-fn message_item(prev: Option<&Entry>, e: &Entry) -> MessageItem {
+fn user_item(s: &State, u: &UserInfo) -> UserItem {
+    UserItem {
+        id: u.id as i32,
+        name: u.name.clone().into(),
+        initial: initial(&u.name),
+        color: avatar_color(&u.name),
+        speaking: s.speaking.contains(&u.id),
+        muted: u.muted,
+        deafened: u.deafened,
+        me: u.id == s.you,
+        away: u.away,
+        level: s.levels.get(&u.id).copied().unwrap_or(0.0),
+        quality: s.quality.get(&u.id).copied().unwrap_or(0),
+    }
+}
+
+fn my_name(s: &State) -> String {
+    s.users.get(&s.you).map(|u| u.name.clone()).unwrap_or_default()
+}
+
+/// Mentions me with @Name (case-insensitive)?
+fn mentions(text: &str, me: &str) -> bool {
+    !me.is_empty() && text.to_lowercase().contains(&format!("@{}", me.to_lowercase()))
+}
+
+/// Notice at the top of the window, disappears on its own after 6 s
+fn show_toast(w: &MainWindow, title: String, text: String) {
+    let gen = with_state(|s| {
+        s.toast_gen += 1;
+        s.toast_gen
+    });
+    w.set_toast_title(title.into());
+    w.set_toast_text(text.into());
+    let weak = w.as_weak();
+    slint::Timer::single_shot(Duration::from_secs(6), move || {
+        if with_state(|s| s.toast_gen) == gen {
+            if let Some(w) = weak.upgrade() {
+                w.set_toast_title("".into());
+                w.set_toast_text("".into());
+            }
+        }
+    });
+}
+
+/// Draws attention to the window in the taskbar/dock (does not steal focus)
+fn request_attention(w: &MainWindow) {
+    w.window().with_winit_window(|ww: &winit::window::Window| {
+        if !ww.has_focus() {
+            ww.request_user_attention(Some(winit::window::UserAttentionType::Informational));
+        }
+    });
+}
+
+fn message_item(prev: Option<&Entry>, e: &Entry, me: &str, you: u32) -> MessageItem {
     let system = e.from.is_none();
     let grouped = !system
         && prev.is_some_and(|p| p.from == e.from && e.time.saturating_sub(p.time) < 300);
@@ -665,19 +776,26 @@ fn message_item(prev: Option<&Entry>, e: &Entry) -> MessageItem {
         text: e.text.clone().into(),
         system,
         grouped,
+        mention: !system && e.from != Some(you) && mentions(&e.text, me),
     }
 }
 
 fn rebuild_messages(s: &State) {
     let log = s.logs.get(&s.current).map(|v| v.as_slice()).unwrap_or(&[]);
-    let items: Vec<MessageItem> =
-        log.iter().enumerate().map(|(i, e)| message_item(if i > 0 { log.get(i - 1) } else { None }, e)).collect();
+    let me = my_name(s);
+    let items: Vec<MessageItem> = log
+        .iter()
+        .enumerate()
+        .map(|(i, e)| message_item(if i > 0 { log.get(i - 1) } else { None }, e, &me, s.you))
+        .collect();
     s.messages.set_vec(items);
 }
 
 fn push_entry(s: &mut State, channel: u32, e: Entry) {
+    let me = my_name(s);
+    let you = s.you;
     let log = s.logs.entry(channel).or_default();
-    let item = message_item(log.last(), &e);
+    let item = message_item(log.last(), &e, &me, you);
     log.push(e);
     let trimmed = log.len() > MAX_LOG;
     if trimmed {
@@ -775,6 +893,8 @@ fn on_event(w: &MainWindow, ev: Event) {
             w.set_tx_loss(0);
             w.set_rx_loss(0.0);
             w.set_volume_open(false);
+            w.set_away(false);
+            with_state(|s| s.voice_model.set_vec(Vec::new()));
             if w.get_page() == 1 {
                 w.set_page(0);
             }
@@ -848,7 +968,32 @@ fn on_event(w: &MainWindow, ev: Event) {
                 cue_for(w, Cue::Leave);
             }
         }
-        Event::Chat(c) => with_state(|s| push_entry(s, c.channel, chat_entry(&c))),
+        Event::Chat(c) => {
+            let mention = with_state(|s| {
+                let m = c.from != s.you && mentions(&c.text, &my_name(s));
+                push_entry(s, c.channel, chat_entry(&c));
+                m
+            });
+            if mention {
+                cue_for(w, Cue::Poke);
+                request_attention(w);
+                show_toast(w, format!("{} hat dich erwähnt", c.name), c.text.chars().take(140).collect());
+            }
+        }
+        Event::Poked { name, text } => {
+            with_state(|s| {
+                let ch = s.current;
+                let line = if text.is_empty() {
+                    format!("{name} hat dich angestupst")
+                } else {
+                    format!("{name} hat dich angestupst: {text}")
+                };
+                system_line(s, ch, line);
+            });
+            cue_for(w, Cue::Poke);
+            request_attention(w);
+            show_toast(w, format!("{name} stupst dich an"), text);
+        }
         Event::Stats { rtt_ms, uplink_loss, downlink_loss } => {
             w.set_ping_ms(rtt_ms as i32);
             w.set_tx_loss(uplink_loss as i32);

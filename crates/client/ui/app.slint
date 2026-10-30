@@ -18,6 +18,11 @@ export struct UserItem {
     muted: bool,
     deafened: bool,
     me: bool,
+    away: bool,
+    // Lautstärke beim Sprechen 0…1 (für den Leuchtring)
+    level: float,
+    // Verbindung: 0 gut, 1 wackelig, 2 schlecht
+    quality: int,
 }
 
 export struct ChannelItem {
@@ -35,6 +40,8 @@ export struct MessageItem {
     text: string,
     system: bool,
     grouped: bool,
+    // dich erwähnt (@Name)
+    mention: bool,
 }
 
 export struct RecentItem {
@@ -118,6 +125,10 @@ component UserRow inherits Rectangle {
             horizontal-stretch: 1;
             overflow: elide;
         }
+        if root.user.away && !root.user.muted && !root.user.deafened: VerticalLayout {
+            alignment: center;
+            Icon { source: @image-url("../assets/icons/moon.svg"); width: 14px; height: 14px; tint: Theme.text-dim; }
+        }
         if root.user.muted && !root.user.deafened: VerticalLayout {
             alignment: center;
             Icon { source: @image-url("../assets/icons/mic-off.svg"); width: 14px; height: 14px; tint: Theme.error; }
@@ -129,12 +140,15 @@ component UserRow inherits Rectangle {
     }
 }
 
-component MessageView inherits VerticalLayout {
+component MessageView inherits Rectangle {
     in property <MessageItem> msg;
-    padding-left: 24px;
-    padding-right: 24px;
-    padding-top: msg.system ? 10px : msg.grouped ? 1px : 12px;
-    padding-bottom: msg.system ? 6px : 1px;
+    background: root.msg.mention ? Theme.accent.transparentize(0.86) : transparent;
+    if root.msg.mention: Rectangle { x: 0; width: 3px; background: Theme.accent; }
+    VerticalLayout {
+    padding-left: 16px;
+    padding-right: 16px;
+    padding-top: root.msg.system ? 10px : root.msg.grouped ? 1px : 12px;
+    padding-bottom: root.msg.system ? 6px : 2px;
 
     if root.msg.system: Text {
         text: root.msg.text;
@@ -183,12 +197,153 @@ component MessageView inherits VerticalLayout {
             }
         }
     }
+    }
+}
+
+// Kachel einer Person im Sprachkanal. `k` skaliert die Kachel (1.0 = 176 × 200 px).
+component VoiceTile inherits Rectangle {
+    in property <UserItem> user;
+    in property <float> k: 1.0;
+    callback clicked();
+    width: 176px * root.k;
+    height: 200px * root.k;
+    border-radius: 16px;
+    background: root.user.speaking ? #22d3ee14 : ta.has-hover && !root.user.me ? Theme.card-hover : Theme.card;
+    border-width: root.user.speaking ? 2px : 1px;
+    border-color: root.user.speaking ? Theme.teal : Theme.border;
+    animate background, border-color { duration: 120ms; }
+    ta := TouchArea {
+        enabled: !root.user.me;
+        mouse-cursor: root.user.me ? default : pointer;
+        clicked => { root.clicked(); }
+    }
+
+    property <length> av: 80px * root.k; // Avatar
+    property <length> cy: 70px * root.k; // Mitte des Avatars
+    // Leuchtring: wächst mit der Lautstärke der Stimme
+    property <length> glow: root.user.speaking ? root.av + (14px + root.user.level * 20px) * root.k : root.av + 12px * root.k;
+    Rectangle {
+        x: (parent.width - root.glow) / 2;
+        y: root.cy - root.glow / 2;
+        width: root.glow;
+        height: root.glow;
+        border-radius: root.glow / 2;
+        background: root.user.speaking ? Theme.teal.transparentize(0.7) : transparent;
+        animate x, y, width, height { duration: 80ms; }
+    }
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: root.cy - self.height / 2;
+        width: root.av + 12px * root.k;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: Theme.card;
+        border-width: root.user.speaking ? 3px : 0px;
+        border-color: Theme.teal;
+    }
+    Rectangle {
+        x: (parent.width - root.av) / 2;
+        y: root.cy - root.av / 2;
+        width: root.av;
+        height: root.av;
+        border-radius: root.av / 2;
+        background: root.user.color;
+        opacity: root.user.away ? 0.45 : 1.0;
+        Text { text: root.user.initial; color: #ffffff; font-size: 34px * root.k; font-weight: 700; }
+    }
+    // Plakette am Avatar: Ton aus / stumm / abwesend
+    if root.user.muted || root.user.deafened || root.user.away: Rectangle {
+        x: parent.width / 2 + root.av / 2 - 22px * root.k;
+        y: root.cy + root.av / 2 - 22px * root.k;
+        width: 30px * root.k;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.user.deafened || root.user.muted ? Theme.destructive : #4a4a4a;
+        border-width: 3px;
+        border-color: Theme.card;
+        Icon {
+            width: 15px * root.k;
+            height: 15px * root.k;
+            tint: #ffffff;
+            source: root.user.deafened ? @image-url("../assets/icons/headphone-off.svg")
+                : root.user.muted ? @image-url("../assets/icons/mic-off.svg")
+                : @image-url("../assets/icons/moon.svg");
+        }
+    }
+    // Verbindungsqualität (nur wenn auffällig)
+    if root.user.quality > 0: Rectangle {
+        x: parent.width - 22px;
+        y: 12px;
+        width: 10px;
+        height: 10px;
+        border-radius: 5px;
+        background: root.user.quality == 1 ? Theme.warning : Theme.error;
+    }
+    Text {
+        x: 10px;
+        y: 128px * root.k;
+        width: parent.width - 20px;
+        text: root.user.name;
+        color: Theme.text;
+        font-weight: 700;
+        font-size: Math.max(13px, 15px * root.k);
+        horizontal-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        x: 10px;
+        y: 128px * root.k + Math.max(13px, 15px * root.k) + 6px;
+        width: parent.width - 20px;
+        horizontal-alignment: center;
+        overflow: elide;
+        font-size: Theme.font-small;
+        color: root.user.speaking ? Theme.teal : root.user.quality == 2 ? Theme.error : Theme.text-dim;
+        text: root.user.speaking ? "spricht"
+            : root.user.deafened ? "Ton aus"
+            : root.user.muted ? "stumm"
+            : root.user.away ? "abwesend"
+            : root.user.quality == 2 ? "schlechte Verbindung"
+            : root.user.me ? "du" : "";
+    }
+}
+
+// Alle Personen im Kanal als Kacheln. Spaltenzahl und Kachelgröße richten sich
+// nach Fläche und Personenzahl, damit möglichst alle ohne Scrollen sichtbar sind.
+component VoiceStage inherits Rectangle {
+    in property <[UserItem]> users;
+    callback user-clicked(int, string);
+    property <length> gap: 16px;
+    property <length> pad: 24px;
+    property <int> n: Math.max(1, root.users.length);
+    property <length> aw: Math.max(1px, root.width - 2 * root.pad);
+    property <length> ah: Math.max(1px, root.height - 2 * root.pad);
+    // Spalten etwa so wählen, dass das Raster das Seitenverhältnis der Fläche trifft
+    property <int> cols: Math.max(1, Math.min(root.n, Math.round(Math.sqrt(root.n * (root.aw / root.ah) * (200 / 176)))));
+    property <int> rows: Math.ceil(root.n / root.cols);
+    property <length> fit-w: (root.aw - (root.cols - 1) * root.gap) / root.cols;
+    property <length> fit-h: (root.ah - (root.rows - 1) * root.gap) / root.rows * 176 / 200;
+    property <length> tw: Math.max(124px, Math.min(232px, Math.min(root.fit-w, root.fit-h)));
+    property <float> k: root.tw / 176px;
+    property <length> th: 200px * root.k;
+    property <length> grid-w: root.cols * root.tw + (root.cols - 1) * root.gap;
+    property <length> grid-h: root.rows * root.th + Math.max(0, root.rows - 1) * root.gap;
+    Flickable {
+        content-width: root.width;
+        content-height: Math.max(root.height, root.grid-h + 2 * root.pad);
+        for u[i] in root.users: VoiceTile {
+            user: u;
+            k: root.k;
+            x: Math.max(root.pad, (root.width - root.grid-w) / 2) + (i - Math.floor(i / root.cols) * root.cols) * (root.tw + root.gap);
+            y: Math.max(root.pad, (root.height - root.grid-h) / 2) + Math.floor(i / root.cols) * (root.th + root.gap);
+            clicked => { root.user-clicked(u.id, u.name); }
+        }
+    }
 }
 
 export component MainWindow inherits Window {
     title: "Tidespeak";
     icon: @image-url("../assets/tidespeak.svg");
-    preferred-width: 1120px;
+    preferred-width: 1200px;
     preferred-height: 720px;
     min-width: 860px;
     min-height: 540px;
@@ -221,6 +376,14 @@ export component MainWindow inherits Window {
     in-out property <bool> muted;
     in-out property <bool> deafened;
     in property <bool> transmitting;
+    in property <[UserItem]> voice-users;
+    in-out property <bool> chat-open: true;
+    in-out property <bool> away;
+    in-out property <bool> echo-cancel;
+    in-out property <bool> auto-threshold;
+    in property <float> threshold-now;
+    in-out property <string> toast-title;
+    in-out property <string> toast-text;
     in property <string> version;
 
     // Verbindungsqualität
@@ -270,6 +433,8 @@ export component MainWindow inherits Window {
     callback open-user(int, string);
     callback user-volume-moved(float);
     callback user-volume-done();
+    callback toggle-away();
+    callback poke-user(string);
     in property <string> input-info;
     in-out property <bool> auto-gain;
     callback key-event(string, bool) -> bool;
@@ -423,7 +588,7 @@ export component MainWindow inherits Window {
                                 spacing: 1px;
                                 Text { color: Theme.text; text: root.nick; font-weight: 600; overflow: elide; }
                                 Text {
-                                    text: root.conn-state == 2 ? (root.transmitting ? "Sendet …" : root.deafened ? "Ton aus" : root.muted ? "Stumm" : "Verbunden")
+                                    text: root.conn-state == 2 ? (root.transmitting ? "Sendet …" : root.deafened ? "Ton aus" : root.muted ? "Stumm" : root.away ? "Abwesend" : "Verbunden")
                                         : root.conn-state == 1 ? "Verbinde …" : "Nicht verbunden";
                                     font-size: Theme.font-small;
                                     overflow: elide;
@@ -500,6 +665,10 @@ export component MainWindow inherits Window {
                             font-weight: 700;
                             font-size: Theme.font-title;
                             vertical-alignment: center;
+                        }
+                        if root.page == 1: VerticalLayout {
+                            alignment: center;
+                            Badge { text: root.voice-users.length == 1 ? "1 Person" : root.voice-users.length + " Personen"; tone: #ffffff; }
                         }
                         if root.page == 1: VerticalLayout {
                             alignment: center;
@@ -677,70 +846,164 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // ─────────── Seite: Chat
-                if root.page == 1: VerticalLayout {
+                // ─────────── Seite: Sprachkanal (Teilnehmer + Chat)
+                if root.page == 1: HorizontalLayout {
                     vertical-stretch: 1;
-                    chat := ScrollView {
-                        vertical-stretch: 1;
-                        content-width: self.visible-width;
-                        changed content-height => {
-                            if (root.stick-bottom) {
-                                self.content-y = min(0px, self.visible-height - self.content-height);
-                            }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        VoiceStage {
+                            vertical-stretch: 1;
+                            users: root.voice-users;
+                            user-clicked(id, name) => { root.open-user(id, name); }
                         }
-                        scrolled => {
-                            root.stick-bottom = self.content-y <= self.visible-height - self.content-height + 40px;
-                        }
-                        VerticalLayout {
-                            padding-bottom: 12px;
-                            alignment: end;
-                            if root.messages.length == 0: Text {
-                                text: "Noch keine Nachrichten in " + root.channel-name + " – schreib die erste!";
-                                color: Theme.text-faint;
-                                horizontal-alignment: center;
-                            }
-                            for m in root.messages: MessageView { msg: m; }
-                        }
-                    }
-                    HorizontalLayout {
-                        padding-left: 20px;
-                        padding-right: 20px;
-                        padding-bottom: 18px;
-                        padding-top: 4px;
-                        Rectangle {
-                            height: 46px;
-                            border-radius: Theme.radius;
-                            background: Theme.entry;
-                            border-width: composer.has-focus ? 2px : 0px;
-                            border-color: Theme.accent.transparentize(0.4);
-                            HorizontalLayout {
-                                padding-left: 4px;
-                                padding-right: 6px;
-                                spacing: 4px;
-                                composer := Entry {
-                                    height: 44px;
-                                    background: transparent;
-                                    border-width: 0px;
-                                    horizontal-stretch: 1;
-                                    placeholder: "Nachricht an " + root.channel-name;
-                                    accepted(t) => {
-                                        root.stick-bottom = true;
-                                        root.send-chat(t);
-                                        self.text = "";
+                        // Steuerleiste
+                        HorizontalLayout {
+                            alignment: center;
+                            padding-bottom: 18px;
+                            padding-top: 6px;
+                            Rectangle {
+                                height: 64px;
+                                border-radius: 32px;
+                                background: Theme.sidebar;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 8px;
+                                    alignment: center;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        RoundButton {
+                                            size: 44px;
+                                            icon-size: 19px;
+                                            icon: root.muted ? @image-url("../assets/icons/mic-off.svg") : @image-url("../assets/icons/mic.svg");
+                                            active: root.muted;
+                                            clicked => { root.toggle-mute(); }
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        RoundButton {
+                                            size: 44px;
+                                            icon-size: 19px;
+                                            icon: root.deafened ? @image-url("../assets/icons/headphone-off.svg") : @image-url("../assets/icons/headphones.svg");
+                                            active: root.deafened;
+                                            clicked => { root.toggle-deafen(); }
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        RoundButton {
+                                            size: 44px;
+                                            icon-size: 19px;
+                                            icon: @image-url("../assets/icons/moon.svg");
+                                            active: root.away;
+                                            active-color: Theme.warning;
+                                            clicked => { root.toggle-away(); }
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        RoundButton {
+                                            size: 44px;
+                                            icon-size: 19px;
+                                            icon: @image-url("../assets/icons/message-square.svg");
+                                            active: root.chat-open;
+                                            active-color: Theme.accent;
+                                            clicked => { root.chat-open = !root.chat-open; }
+                                        }
+                                    }
+                                    Rectangle { width: 1px; height: 30px; background: Theme.border; }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 56px;
+                                            height: 44px;
+                                            border-radius: 22px;
+                                            background: leave-ta.pressed ? #a51d2d : leave-ta.has-hover ? #d02535 : Theme.destructive;
+                                            leave-ta := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.disconnect(); }
+                                            }
+                                            Icon { source: @image-url("../assets/icons/phone-off.svg"); width: 19px; height: 19px; tint: #ffffff; }
+                                        }
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    // Chat des Kanals
+                    if root.chat-open: Rectangle {
+                        width: 340px;
+                        background: Theme.panel;
+                        Rectangle { x: 0; width: 1px; background: Theme.border; }
+                        VerticalLayout {
+                            padding-top: 4px;
+                    chat := ScrollView {
+                                vertical-stretch: 1;
+                                content-width: self.visible-width;
+                                changed content-height => {
+                                    if (root.stick-bottom) {
+                                        self.content-y = min(0px, self.visible-height - self.content-height);
+                                    }
+                                }
+                                scrolled => {
+                                    root.stick-bottom = self.content-y <= self.visible-height - self.content-height + 40px;
+                                }
                                 VerticalLayout {
-                                    alignment: center;
-                                    RoundButton {
-                                        size: 34px;
-                                        icon-size: 16px;
-                                        icon: @image-url("../assets/icons/send-horizontal.svg");
-                                        tint: composer.text == "" ? Theme.text-faint : Theme.accent-hover;
-                                        clicked => {
-                                            root.stick-bottom = true;
-                                            root.send-chat(composer.text);
-                                            composer.text = "";
-                                            composer.focus-input();
+                                    padding-bottom: 12px;
+                                    alignment: end;
+                                    if root.messages.length == 0: Text {
+                                        text: "Noch keine Nachrichten in " + root.channel-name + " – schreib die erste!";
+                                        color: Theme.text-faint;
+                                        horizontal-alignment: center;
+                                    }
+                                    for m in root.messages: MessageView { msg: m; }
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 20px;
+                                padding-right: 20px;
+                                padding-bottom: 18px;
+                                padding-top: 4px;
+                                Rectangle {
+                                    height: 46px;
+                                    border-radius: Theme.radius;
+                                    background: Theme.entry;
+                                    border-width: composer.has-focus ? 2px : 0px;
+                                    border-color: Theme.accent.transparentize(0.4);
+                                    HorizontalLayout {
+                                        padding-left: 4px;
+                                        padding-right: 6px;
+                                        spacing: 4px;
+                                        composer := Entry {
+                                            height: 44px;
+                                            background: transparent;
+                                            border-width: 0px;
+                                            horizontal-stretch: 1;
+                                            placeholder: "Nachricht an " + root.channel-name;
+                                            accepted(t) => {
+                                                root.stick-bottom = true;
+                                                root.send-chat(t);
+                                                self.text = "";
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            RoundButton {
+                                                size: 34px;
+                                                icon-size: 16px;
+                                                icon: @image-url("../assets/icons/send-horizontal.svg");
+                                                tint: composer.text == "" ? Theme.text-faint : Theme.accent-hover;
+                                                clicked => {
+                                                    root.stick-bottom = true;
+                                                    root.send-chat(composer.text);
+                                                    composer.text = "";
+                                                    composer.focus-input();
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -845,15 +1108,30 @@ export component MainWindow inherits Window {
                                     }
                                     if root.voice-mode == 0: Row {
                                         title: "Empfindlichkeit";
+                                        subtitle: root.auto-threshold ? "Automatisch an den Raum angepasst" : "";
                                         VerticalLayout {
                                             alignment: center;
                                             spacing: 6px;
-                                            Slider {
-                                                width: 300px;
-                                                value <=> root.threshold;
-                                                released => { root.settings-changed(); }
+                                            HorizontalLayout {
+                                                spacing: 10px;
+                                                Slider {
+                                                    width: 230px;
+                                                    enabled: !root.auto-threshold;
+                                                    value <=> root.threshold;
+                                                    released => { root.settings-changed(); }
+                                                }
+                                                Text { text: "Auto"; color: Theme.text-dim; font-size: Theme.font-small; vertical-alignment: center; }
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Switch { checked <=> root.auto-threshold; toggled => { root.settings-changed(); } }
+                                                }
                                             }
-                                            LevelMeter { width: 300px; level: root.level; threshold: root.threshold; active: root.transmitting; }
+                                            LevelMeter {
+                                                width: 300px;
+                                                level: root.level;
+                                                threshold: root.auto-threshold ? root.threshold-now : root.threshold;
+                                                active: root.transmitting;
+                                            }
                                         }
                                     }
                                     Row {
@@ -895,6 +1173,14 @@ export component MainWindow inherits Window {
                             VerticalLayout {
                                 GroupTitle { title: "Klang"; }
                                 BoxedList {
+                                    Row {
+                                        title: "Echo-Unterdrückung";
+                                        subtitle: "Verhindert, dass andere sich selbst hören, wenn du Lautsprecher statt Kopfhörer nutzt.";
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Switch { checked <=> root.echo-cancel; toggled => { root.settings-changed(); } }
+                                        }
+                                    }
                                     Row {
                                         title: "Hintergrundgeräusche entfernen";
                                         subtitle: "Filtert Tastatur, Lüfter und Rauschen aus deinem Mikrofon (RNNoise, läuft lokal).";
@@ -1027,6 +1313,66 @@ export component MainWindow inherits Window {
                 Text { text: Math.round(root.volume-value * 200) + " %"; width: 44px; color: Theme.text; vertical-alignment: center; horizontal-alignment: right; }
             }
             if root.volume-stats != "": Text { text: root.volume-stats; color: Theme.text-dim; font-size: Theme.font-small; wrap: word-wrap; }
+            Rectangle { height: 1px; background: Theme.border; }
+            HorizontalLayout {
+                spacing: 8px;
+                poke-entry := Entry {
+                    horizontal-stretch: 1;
+                    placeholder: "Kurze Nachricht (optional)";
+                    accepted(t) => {
+                        root.poke-user(t);
+                        self.text = "";
+                        root.volume-open = false;
+                    }
+                }
+                Button {
+                    text: "Anstupsen";
+                    has-icon: true;
+                    icon: @image-url("../assets/icons/bell-ring.svg");
+                    clicked => {
+                        root.poke-user(poke-entry.text);
+                        poke-entry.text = "";
+                        root.volume-open = false;
+                    }
+                }
+            }
+        }
+    }
+
+    // Hinweis-Banner (Anstupsen, Erwähnung)
+    if root.toast-title != "": Rectangle {
+        x: 272px + (parent.width - 272px - self.width) / 2;
+        y: 58px;
+        width: 440px;
+        height: toast.preferred-height;
+        border-radius: Theme.radius;
+        background: #1f3550;
+        border-width: 1px;
+        border-color: Theme.accent;
+        drop-shadow-blur: 20px;
+        drop-shadow-color: #00000080;
+        toast := HorizontalLayout {
+            padding: 14px;
+            spacing: 12px;
+            VerticalLayout {
+                alignment: center;
+                Icon { source: @image-url("../assets/icons/bell-ring.svg"); tint: Theme.teal; width: 22px; height: 22px; }
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 2px;
+                Text { text: root.toast-title; color: Theme.text; font-weight: 700; }
+                if root.toast-text != "": Text { text: root.toast-text; color: #ffffffcc; wrap: word-wrap; }
+            }
+            VerticalLayout {
+                alignment: start;
+                RoundButton {
+                    icon: @image-url("../assets/icons/x.svg");
+                    size: 24px;
+                    icon-size: 12px;
+                    clicked => { root.toast-title = ""; root.toast-text = ""; }
+                }
+            }
         }
     }
 

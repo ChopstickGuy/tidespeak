@@ -39,6 +39,9 @@ pub struct AudioSettings {
     pub activation_threshold: f32,
     pub noise_suppression: bool,
     pub agc: bool,
+    pub echo_cancel: bool,
+    /// Adjust the voice activation threshold automatically to the background noise
+    pub auto_threshold: bool,
     pub bitrate: i32,
     pub ptt_key: u32,
 }
@@ -75,11 +78,19 @@ pub struct Shared {
     pub rx: Mutex<HashMap<u32, RxInfo>>,
     /// Loss that others report for our voice (percent) -> strength of error correction
     pub uplink_loss: AtomicU32,
+    /// Current loudness per speaker (0…1, display scale) – for the speaking ring
+    pub rx_level: Mutex<HashMap<u32, f32>>,
+    /// Voice activation threshold actually in effect (0…1, display scale), as f32 bits
+    threshold_now: AtomicU32,
 }
 
 impl Shared {
     pub fn level(&self) -> f32 {
         f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
+
+    pub fn threshold_now(&self) -> f32 {
+        f32::from_bits(self.threshold_now.load(Ordering::Relaxed))
     }
 }
 
@@ -131,7 +142,11 @@ impl Audio {
             user_gain: Mutex::new(HashMap::new()),
             rx: Mutex::new(HashMap::new()),
             uplink_loss: AtomicU32::new(0),
+            rx_level: Mutex::new(HashMap::new()),
+            threshold_now: AtomicU32::new(0f32.to_bits()),
         });
+        // Was aus den Lautsprechern kommt, geht als Referenz an die Echo-Unterdrückung
+        let (far_tx, far_rx) = rtrb::RingBuffer::<f32>::new(SAMPLE_RATE as usize);
         let (incoming_tx, incoming_rx) = mpsc::channel();
         let (dev_tx, dev_rx) = mpsc::channel();
         let (mic_tx, mic_rx) = mpsc::channel::<MicSource>();
@@ -141,12 +156,12 @@ impl Audio {
         let local_tx = incoming_tx.clone();
         let encoder = thread::Builder::new()
             .name("tidespeak-encoder".into())
-            .spawn(move || encoder_thread(enc_shared, mic_rx, local_tx))
+            .spawn(move || encoder_thread(enc_shared, mic_rx, local_tx, far_rx))
             .expect("Encoder-Thread");
         let mix_shared = shared.clone();
         thread::Builder::new()
             .name("tidespeak-mixer".into())
-            .spawn(move || mixer_thread(mix_shared, incoming_rx, spk_rx))
+            .spawn(move || mixer_thread(mix_shared, incoming_rx, spk_rx, far_tx))
             .expect("Mischer-Thread");
         let dev_shared = shared.clone();
         let encoder_handle = encoder.thread().clone();
@@ -174,6 +189,7 @@ impl Audio {
         self.shared.speaking.lock().unwrap().clear();
         self.shared.rx.lock().unwrap().clear();
         self.shared.uplink_loss.store(0, Ordering::Relaxed);
+        self.shared.rx_level.lock().unwrap().clear();
     }
 
     pub fn restart_devices(&self) {
@@ -196,6 +212,7 @@ impl Audio {
             Cue::Connected => &[(392.0, 0.06), (523.25, 0.06), (783.99, 0.12)],
             Cue::Mute => &[(311.13, 0.08)],
             Cue::Unmute => &[(466.16, 0.08)],
+            Cue::Poke => &[(783.99, 0.07), (1046.5, 0.07), (1318.5, 0.12)],
         };
         let mut samples = Vec::new();
         for &(freq, secs) in tones {
@@ -221,6 +238,8 @@ pub enum Cue {
     Connected,
     Mute,
     Unmute,
+    /// Poked or mentioned
+    Poke,
 }
 
 /// Shows only devices that make sense to a person. With raw ALSA (no
@@ -461,6 +480,7 @@ pub struct Capture {
     highpass: Biquad,
     agc: Agc,
     denoise: Box<nnnoiseless::DenoiseState<'static>>,
+    aec: Option<sonora::AudioProcessing>,
     mono: Vec<f32>,
     pending: Vec<f32>,
     frame: Vec<f32>,
@@ -476,6 +496,7 @@ impl Capture {
             highpass: Biquad::highpass(80.0, SAMPLE_RATE as f32),
             agc: Agc::default(),
             denoise: nnnoiseless::DenoiseState::new(),
+            aec: None,
             mono: Vec::new(),
             pending: Vec::new(),
             frame: Vec::with_capacity(FRAME_SAMPLES),
@@ -491,6 +512,32 @@ impl Capture {
 
     pub fn agc_gain_db(&self) -> f32 {
         self.agc.gain_db()
+    }
+
+    fn aec(&mut self) -> &mut sonora::AudioProcessing {
+        self.aec.get_or_insert_with(|| {
+            let cfg = sonora::StreamConfig::new(SAMPLE_RATE, 1);
+            let mut apm = sonora::AudioProcessing::builder()
+                .config(sonora::Config {
+                    echo_canceller: Some(sonora::config::EchoCanceller::default()),
+                    ..Default::default()
+                })
+                .capture_config(cfg)
+                .render_config(cfg)
+                .build();
+            // Ausgabepuffer + typische Gerätelatenz; AEC3 schätzt den Rest selbst
+            let _ = apm.set_stream_delay_ms(OUT_TARGET_MS as i32 + 30);
+            apm
+        })
+    }
+
+    /// Playback signal (48 kHz mono) in 10 ms blocks – reference for echo cancellation
+    pub fn render(&mut self, block: &[f32; DENOISE_FRAME], s: &AudioSettings) {
+        if !s.echo_cancel {
+            return;
+        }
+        let mut out = [0f32; DENOISE_FRAME];
+        let _ = self.aec().process_render_f32(&[&block[..]], &mut [&mut out[..]]);
     }
 
     /// Interleaved device samples in; for every complete 20 ms frame
@@ -520,6 +567,10 @@ impl Capture {
 
     fn process_block(&mut self, block: &mut [f32; DENOISE_FRAME], s: &AudioSettings) {
         self.highpass.process(block);
+        if s.echo_cancel {
+            let input = *block;
+            let _ = self.aec().process_capture_f32(&[&input[..]], &mut [&mut block[..]]);
+        }
         if (s.input_gain - 1.0).abs() > 1e-3 {
             block.iter_mut().for_each(|x| *x *= s.input_gain);
         }
@@ -553,7 +604,12 @@ pub struct Transmitter {
     bitrate: i32,
     loss: i32,
     packet: Vec<u8>,
+    noise_db: f32,
+    ptt_hold: u32,
 }
+
+/// Push-to-talk release delay: keep sending this many frames after letting go (200 ms)
+const PTT_RELEASE_FRAMES: u32 = 10;
 
 impl Transmitter {
     pub fn new() -> Option<Self> {
@@ -570,7 +626,18 @@ impl Transmitter {
             bitrate: 0,
             loss: -1,
             packet: vec![0u8; 1275],
+            noise_db: -60.0,
+            ptt_hold: 0,
         })
+    }
+
+    /// Voice activation threshold in effect (dBFS): manual, or automatically 12 dB above the noise
+    pub fn threshold_db(&self, s: &AudioSettings) -> f32 {
+        if s.auto_threshold {
+            (self.noise_db + 12.0).clamp(-58.0, -30.0)
+        } else {
+            dsp::threshold_db(s.activation_threshold)
+        }
     }
 
     fn packet(&mut self, flags: u8, opus: &[u8]) -> Vec<u8> {
@@ -602,10 +669,21 @@ impl Transmitter {
             self.loss = loss;
             let _ = self.enc.set_packet_loss_perc(loss);
         }
+        // Grundrauschen verfolgen (nur in Sprechpausen): schnell nach unten, langsam nach oben
+        if vad < 0.15 && level_db > -100.0 {
+            let rate = if level_db < self.noise_db { 0.2 } else { 0.01 };
+            self.noise_db += (level_db - self.noise_db) * rate;
+        }
+        if ptt {
+            self.ptt_hold = PTT_RELEASE_FRAMES;
+        } else {
+            self.ptt_hold = self.ptt_hold.saturating_sub(1);
+        }
+        let threshold = self.threshold_db(s);
         let wants = match s.voice_mode {
             VoiceMode::Continuous => true,
-            VoiceMode::PushToTalk => ptt,
-            VoiceMode::Activity => self.gate.decide(vad, level_db, dsp::threshold_db(s.activation_threshold)),
+            VoiceMode::PushToTalk => ptt || self.ptt_hold > 0,
+            VoiceMode::Activity => self.gate.decide(vad, level_db, threshold),
         };
         if !active {
             if self.sending {
@@ -651,7 +729,12 @@ fn rate_text(rate: u32) -> String {
     }
 }
 
-fn encoder_thread(shared: Arc<Shared>, mic_rx: Receiver<MicSource>, local_tx: Sender<Incoming>) {
+fn encoder_thread(
+    shared: Arc<Shared>,
+    mic_rx: Receiver<MicSource>,
+    local_tx: Sender<Incoming>,
+    mut far_rx: rtrb::Consumer<f32>,
+) {
     let Some(mut tx) = Transmitter::new() else {
         log::error!("Opus-Encoder konnte nicht erzeugt werden");
         return;
@@ -689,6 +772,14 @@ fn encoder_thread(shared: Arc<Shared>, mic_rx: Receiver<MicSource>, local_tx: Se
         }
 
         let s = shared.settings.lock().unwrap().clone();
+        // Lautsprecher-Signal an die Echo-Unterdrückung (oder verwerfen, wenn sie aus ist)
+        while far_rx.slots() >= DENOISE_FRAME {
+            let mut block = [0f32; DENOISE_FRAME];
+            for v in block.iter_mut() {
+                *v = far_rx.pop().unwrap_or(0.0);
+            }
+            c.render(&block, &s);
+        }
         let ptt = shared.ptt.load(Ordering::Relaxed) || ptt_global(s.ptt_key);
         let muted = shared.muted.load(Ordering::Relaxed) || shared.deafened.load(Ordering::Relaxed);
         let out = shared.voice_out.lock().unwrap().clone();
@@ -710,6 +801,7 @@ fn encoder_thread(shared: Arc<Shared>, mic_rx: Receiver<MicSource>, local_tx: Se
         });
         shared.level.store(level_smooth.to_bits(), Ordering::Relaxed);
         shared.transmitting.store(transmitting, Ordering::Relaxed);
+        shared.threshold_now.store(dsp::level_to_slider(tx.threshold_db(&s)).to_bits(), Ordering::Relaxed);
 
         let ch = c.channel();
         if ch != shown_channel {
@@ -736,7 +828,12 @@ struct SpeakerState {
     last_packet: Instant,
 }
 
-fn mixer_thread(shared: Arc<Shared>, incoming: Receiver<Incoming>, spk_rx: Receiver<SpeakerSink>) {
+fn mixer_thread(
+    shared: Arc<Shared>,
+    incoming: Receiver<Incoming>,
+    spk_rx: Receiver<SpeakerSink>,
+    mut far_tx: rtrb::Producer<f32>,
+) {
     let clock = Instant::now();
     let mut sink: Option<(SpeakerSink, SincResampler, usize)> = None;
     let mut speakers: HashMap<u32, SpeakerState> = HashMap::new();
@@ -798,10 +895,20 @@ fn mixer_thread(shared: Arc<Shared>, incoming: Receiver<Incoming>, spk_rx: Recei
             // so lange mischen, bis ~60 ms im Ausgabepuffer liegen
             while *capacity - sk.prod.slots() < target && sk.prod.slots() >= per_frame {
                 mix.iter_mut().for_each(|v| *v = 0.0);
+                let mut levels = Vec::with_capacity(speakers.len());
                 for (id, st) in speakers.iter_mut() {
                     if st.jb.next_frame(&mut tmp) && !deaf {
                         let g = gains.get(id).copied().unwrap_or(1.0);
                         mix.iter_mut().zip(&tmp).for_each(|(m, t)| *m += t * g);
+                        levels.push((*id, dsp::level_to_slider(dsp::rms_db(&tmp))));
+                    } else {
+                        levels.push((*id, 0.0));
+                    }
+                }
+                {
+                    let mut rl = shared.rx_level.lock().unwrap();
+                    for (id, l) in levels {
+                        rl.insert(id, l);
                     }
                 }
                 if let Some(f) = local.pop_front() {
@@ -810,6 +917,12 @@ fn mixer_thread(shared: Arc<Shared>, incoming: Receiver<Incoming>, spk_rx: Recei
                 mix.iter_mut().for_each(|v| *v *= volume);
                 // weiche Begrenzung statt hartem Clipping, wenn mehrere gleichzeitig reden
                 dsp::soft_limit(&mut mix);
+                // dasselbe Signal als Echo-Referenz (ist der Ring voll, ist der Encoder gerade nicht aktiv)
+                if far_tx.slots() >= FRAME_SAMPLES {
+                    for v in &mix {
+                        let _ = far_tx.push(*v);
+                    }
+                }
                 resampled.clear();
                 rs.process(&mix, &mut resampled);
                 for v in &resampled {
@@ -817,10 +930,13 @@ fn mixer_thread(shared: Arc<Shared>, incoming: Receiver<Incoming>, spk_rx: Recei
                 }
             }
         } else {
-            // ohne Ausgabegerät trotzdem Puffer leeren, damit nichts aufläuft
-            for st in speakers.values_mut() {
+            // ohne Ausgabegerät trotzdem Puffer leeren, damit nichts aufläuft (Pegel für die Anzeige bleibt)
+            let mut rl = shared.rx_level.lock().unwrap();
+            for (id, st) in speakers.iter_mut() {
                 while st.jb.buffered() > 3 {
-                    st.jb.next_frame(&mut tmp);
+                    if st.jb.next_frame(&mut tmp) {
+                        rl.insert(*id, dsp::level_to_slider(dsp::rms_db(&tmp)));
+                    }
                 }
             }
         }
@@ -849,6 +965,8 @@ fn mixer_thread(shared: Arc<Shared>, incoming: Receiver<Incoming>, spk_rx: Recei
         if last_cleanup.elapsed() > Duration::from_secs(5) {
             last_cleanup = Instant::now();
             speakers.retain(|_, s| s.last_packet.elapsed() < SPEAKER_IDLE);
+            let alive: Vec<u32> = speakers.keys().copied().collect();
+            shared.rx_level.lock().unwrap().retain(|id, _| alive.contains(id));
             shared.speaking.lock().unwrap().retain(|_, t| t.elapsed() < SPEAKER_IDLE);
         }
         thread::sleep(Duration::from_millis(5));
@@ -869,6 +987,8 @@ mod tests {
             activation_threshold: 0.25,
             noise_suppression: true,
             agc: true,
+            echo_cancel: false,
+            auto_threshold: false,
             bitrate: 64_000,
             ptt_key: 0,
         }
@@ -900,6 +1020,65 @@ mod tests {
         let last = sent.last().unwrap();
         assert_eq!(last[2], VOICE_FLAG_END);
         assert_eq!(last.len(), 3);
+    }
+
+    #[test]
+    fn echo_from_speakers_is_removed() {
+        // Lautsprecher spielen sprachähnliches Signal; es kommt 60 ms später, halb so laut, ins Mikro zurück
+        let s = AudioSettings { agc: false, noise_suppression: false, echo_cancel: true, ..settings() };
+        let mut cap = Capture::new(1, SAMPLE_RATE);
+        let mut x = 0x1234_5678u32;
+        let mut lp = 0f32;
+        let far: Vec<f32> = (0..SAMPLE_RATE as usize * 6)
+            .map(|i| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                let n = (x as f32 / u32::MAX as f32) * 2.0 - 1.0;
+                lp += (n - lp) * 0.2; // tiefpassgefiltertes Rauschen …
+                let syllable = ((i as f32 / 4800.0).sin().abs() > 0.3) as u8 as f32; // … in Silben
+                lp * 0.6 * syllable
+            })
+            .collect();
+        let delay = SAMPLE_RATE as usize * 60 / 1000;
+        let mic: Vec<f32> = (0..far.len()).map(|i| if i >= delay { far[i - delay] * 0.5 } else { 0.0 }).collect();
+        let mut out = Vec::new();
+        for (f, m) in far.chunks_exact(DENOISE_FRAME).zip(mic.chunks_exact(DENOISE_FRAME)) {
+            let mut block = [0f32; DENOISE_FRAME];
+            block.copy_from_slice(f);
+            cap.render(&block, &s);
+            cap.feed(m, &s, |pcm, _, _| out.extend_from_slice(pcm));
+        }
+        let tail = out.len() / 2;
+        let erle = dsp::rms_db(&mic[tail..]) - dsp::rms_db(&out[tail..]);
+        println!("Echo-Dämpfung: {erle:.1} dB");
+        assert!(erle > 15.0, "Echo nur um {erle:.1} dB gedämpft");
+    }
+
+    #[test]
+    fn echo_cancel_keeps_own_voice_without_echo() {
+        // Headset: kein Echo, aber Lautsprecher spielen etwas -> eigene Stimme bleibt erhalten
+        let s = AudioSettings { agc: false, noise_suppression: false, echo_cancel: true, ..settings() };
+        let mut cap = Capture::new(1, SAMPLE_RATE);
+        let voice: Vec<f32> = (0..SAMPLE_RATE as usize * 4)
+            .map(|i| {
+                let t = i as f32 / SAMPLE_RATE as f32;
+                ((t * 220.0 * std::f32::consts::TAU).sin() * 0.2 + (t * 660.0 * std::f32::consts::TAU).sin() * 0.1)
+                    * (((t * 3.0).sin().abs() > 0.2) as u8 as f32)
+            })
+            .collect();
+        let far: Vec<f32> = (0..voice.len()).map(|i| ((i as f32) * 0.011).sin() * 0.3).collect();
+        let mut out = Vec::new();
+        for (f, m) in far.chunks_exact(DENOISE_FRAME).zip(voice.chunks_exact(DENOISE_FRAME)) {
+            let mut block = [0f32; DENOISE_FRAME];
+            block.copy_from_slice(f);
+            cap.render(&block, &s);
+            cap.feed(m, &s, |pcm, _, _| out.extend_from_slice(pcm));
+        }
+        let half = out.len() / 2;
+        let diff = dsp::rms_db(&voice[half..out.len()]) - dsp::rms_db(&out[half..]);
+        println!("eigene Stimme: {diff:.1} dB leiser");
+        assert!(diff < 3.0, "eigene Stimme um {diff:.1} dB gedämpft");
     }
 
     #[test]
@@ -943,6 +1122,8 @@ mod bench {
             activation_threshold: 0.25,
             noise_suppression: true,
             agc: true,
+            echo_cancel: true,
+            auto_threshold: true,
             bitrate: 64_000,
             ptt_key: 0,
         };
@@ -958,13 +1139,15 @@ mod bench {
         let mut tx = Transmitter::new().unwrap();
         let mut n = 0usize;
         let t = Instant::now();
+        let far = [0.05f32; DENOISE_FRAME];
         for chunk in inter.chunks(882) {
+            cap.render(&far, &s);
             cap.feed(chunk, &s, |pcm, vad, db| {
                 tx.frame(pcm, vad, db, &s, false, true, 0, |_| n += 1);
             });
         }
         let pct = t.elapsed().as_secs_f64() / secs as f64 * 100.0;
-        println!("neue Mikrofonkette: {pct:.2} % eines Kerns beim Sprechen ({n} Pakete)");
+        println!("Mikrofonkette inkl. Echo-Unterdrückung: {pct:.2} % eines Kerns beim Sprechen ({n} Pakete)");
     }
 
     /// Rechenkosten pro Sekunde Sprache: `cargo test --release -p tidespeak pipeline_cost -- --ignored --nocapture`
@@ -1326,6 +1509,8 @@ mod sim {
             activation_threshold: 0.25,
             noise_suppression: true,
             agc: true,
+            echo_cancel: false,
+            auto_threshold: false,
             bitrate: 64_000,
             ptt_key: 0,
         };

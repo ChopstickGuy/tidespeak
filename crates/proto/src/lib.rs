@@ -12,10 +12,11 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const ALPN: &[u8] = b"tidespeak/1";
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const DEFAULT_PORT: u16 = 9987;
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_CHAT_CHARS: usize = 2000;
+pub const MAX_POKE_CHARS: usize = 200;
 pub const MAX_FRAME_BYTES: usize = 512 * 1024;
 
 /// Voice: 48 kHz mono, 20 ms per packet.
@@ -41,6 +42,8 @@ pub struct UserInfo {
     pub channel: u32,
     pub muted: bool,
     pub deafened: bool,
+    /// Away (AFK)
+    pub away: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -58,7 +61,9 @@ pub enum ClientMsg {
     Hello { version: u32, name: String },
     Join { channel: u32 },
     Chat { text: String },
-    State { muted: bool, deafened: bool },
+    State { muted: bool, deafened: bool, away: bool },
+    /// Poke another user (with an optional short message)
+    Poke { target: u32, text: String },
     /// Receive quality per speaker: (speaker id, loss in percent). About every 2 s.
     Report { loss: Vec<(u32, u8)> },
 }
@@ -80,6 +85,8 @@ pub enum ServerMsg {
     History { channel: u32, lines: Vec<ChatLine> },
     /// How well your voice arrives at `listener`: loss in percent
     Feedback { listener: u32, loss: u8 },
+    /// Someone poked you
+    Poked { from: u32, name: String, text: String },
 }
 
 #[derive(Debug)]

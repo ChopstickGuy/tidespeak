@@ -19,6 +19,8 @@ slint = { version = "1.18", default-features = false, features = ["std", "compat
 cpal = "0.18"
 opus = "0.4"
 nnnoiseless = { version = "0.5", default-features = false }
+# Echo-Unterdrückung (WebRTC AEC3, reiner Rust-Port)
+sonora = "0.2"
 rtrb = "0.3"
 directories = "6"
 toml = "0.9"

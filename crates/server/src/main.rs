@@ -42,6 +42,7 @@ struct User {
     voice_window: Instant,
     voice_count: u32,
     last_report: Instant,
+    last_poke: Instant,
 }
 
 struct State {
@@ -348,7 +349,7 @@ async fn handle_connection(incoming: quinn::Incoming, state: Shared) -> Result<(
         st.next_id = st.next_id.wrapping_add(1).max(1);
         let base = sanitize_name(&name);
         let base = if base.is_empty() { "Gast".to_string() } else { base };
-        let info = UserInfo { id, name: st.unique_name(&base), channel: 0, muted: false, deafened: false };
+        let info = UserInfo { id, name: st.unique_name(&base), channel: 0, muted: false, deafened: false, away: false };
         let mut users: Vec<UserInfo> = st.users.values().map(|u| u.info.clone()).collect();
         users.push(info.clone());
         let _ = tx.send(ServerMsg::Welcome {
@@ -371,6 +372,7 @@ async fn handle_connection(incoming: quinn::Incoming, state: Shared) -> Result<(
                 voice_window: Instant::now(),
                 voice_count: 0,
                 last_report: Instant::now() - Duration::from_secs(10),
+                last_poke: Instant::now() - Duration::from_secs(10),
             },
         );
         (id, info)
@@ -469,10 +471,24 @@ async fn control_loop(state: &Shared, id: u32, recv: &mut quinn::RecvStream) -> 
                     }
                 }
             }
-            ClientMsg::State { muted, deafened } => {
+            ClientMsg::Poke { target, text } => {
+                // Anstupsen: höchstens alle 2 s, nicht sich selbst
+                let Some(u) = st.users.get_mut(&id) else { break };
+                if target == id || u.last_poke.elapsed() < Duration::from_secs(2) {
+                    continue;
+                }
+                u.last_poke = Instant::now();
+                let name = u.info.name.clone();
+                let text: String = sanitize_chat(&text).chars().take(MAX_POKE_CHARS).collect();
+                if let Some(t) = st.users.get(&target) {
+                    let _ = t.tx.send(ServerMsg::Poked { from: id, name, text });
+                }
+            }
+            ClientMsg::State { muted, deafened, away } => {
                 let Some(u) = st.users.get_mut(&id) else { break };
                 u.info.muted = muted || deafened;
                 u.info.deafened = deafened;
+                u.info.away = away;
                 let info = u.info.clone();
                 st.broadcast(&ServerMsg::UserUpdated(info), None);
             }

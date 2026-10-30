@@ -16,7 +16,7 @@ use tidespeak_proto::*;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("tidespeak-bot <adresse> <name> [--speak SEK] [--listen SEK] [--chat TEXT] [--channel ID] [--pin FP] [--speak-delay SEK] [--loss PROZENT]");
+        eprintln!("tidespeak-bot <adresse> <name> [--speak SEK] [--listen SEK] [--chat TEXT] [--channel ID] [--pin FP] [--speak-delay SEK] [--loss PROZENT] [--mute] [--away] [--poke NAME:TEXT]");
         std::process::exit(2);
     }
     let address = tidespeak::config::normalize_address(&args[1]);
@@ -28,6 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pin: Option<String> = None;
     let mut speak_delay = 0.0f32;
     let mut loss_pct = 0.0f64;
+    let (mut muted, mut away) = (false, false);
+    let mut poke: Option<(String, String)> = None;
     let mut i = 3;
     while i < args.len() {
         let v = args.get(i + 1).cloned().unwrap_or_default();
@@ -39,6 +41,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--pin" => pin = Some(v),
             "--speak-delay" => speak_delay = v.parse()?,
             "--loss" => loss_pct = v.parse()?,
+            "--mute" => {
+                muted = true;
+                i -= 1;
+            }
+            "--away" => {
+                away = true;
+                i -= 1;
+            }
+            "--poke" => {
+                let (n, t) = v.split_once(':').unwrap_or((v.as_str(), ""));
+                poke = Some((n.to_string(), t.to_string()));
+            }
             a => return Err(format!("unbekannt: {a}").into()),
         }
         i += 2;
@@ -66,8 +80,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handshake = t0.elapsed();
     let (mut send, mut recv) = conn.open_bi().await?;
     write_msg(&mut send, &ClientMsg::Hello { version: PROTOCOL_VERSION, name: name.clone() }).await?;
+    let others: Vec<UserInfo>;
     let you = match read_msg::<_, ServerMsg>(&mut recv).await? {
         Some(ServerMsg::Welcome { you, channels, users, server_name, .. }) => {
+            others = users.clone();
             println!(
                 "verbunden als #{you} mit „{server_name}“ in {:.1} ms, {} Kanäle, {} Nutzer, Fingerabdruck {}",
                 handshake.as_secs_f64() * 1000.0,
@@ -81,6 +97,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     if let Some(ch) = channel {
         write_msg(&mut send, &ClientMsg::Join { channel: ch }).await?;
+    }
+    if muted || away {
+        write_msg(&mut send, &ClientMsg::State { muted, deafened: false, away }).await?;
+    }
+    if let Some((name, text)) = &poke {
+        if let Some(u) = others.iter().find(|u| u.name.eq_ignore_ascii_case(name)) {
+            write_msg(&mut send, &ClientMsg::Poke { target: u.id, text: text.clone() }).await?;
+        }
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
     if let Some(t) = &chat {

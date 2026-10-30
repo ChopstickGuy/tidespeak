@@ -19,7 +19,8 @@ pub enum Command {
     Disconnect,
     Join(u32),
     Chat(String),
-    State { muted: bool, deafened: bool },
+    State { muted: bool, deafened: bool, away: bool },
+    Poke { target: u32, text: String },
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,8 @@ pub enum Event {
     UserLeft(u32),
     Chat(ChatLine),
     History { channel: u32, lines: Vec<ChatLine> },
+    /// Someone poked us
+    Poked { name: String, text: String },
     /// Connection quality, about every 2 s
     Stats {
         rtt_ms: u32,
@@ -250,6 +253,7 @@ async fn session(
     let state_msg = ClientMsg::State {
         muted: audio.shared.muted.load(std::sync::atomic::Ordering::Relaxed),
         deafened: audio.shared.deafened.load(std::sync::atomic::Ordering::Relaxed),
+        away: false,
     };
     let _ = write_msg(&mut send, &state_msg).await;
 
@@ -279,6 +283,7 @@ async fn session(
                     ServerMsg::UserLeft { id } => on_event(Event::UserLeft(id)),
                     ServerMsg::Chat(c) => on_event(Event::Chat(c)),
                     ServerMsg::History { channel, lines } => on_event(Event::History { channel, lines }),
+                    ServerMsg::Poked { name, text, .. } => on_event(Event::Poked { name, text }),
                     ServerMsg::Feedback { listener, loss } => {
                         feedback.insert(listener, (loss, std::time::Instant::now()));
                     }
@@ -302,8 +307,11 @@ async fn session(
                 Some(c @ Command::Connect { .. }) => { next = Some(c); break String::new(); }
                 Some(Command::Join(ch)) => { let _ = write_msg(&mut send, &ClientMsg::Join { channel: ch }).await; }
                 Some(Command::Chat(t)) => { let _ = write_msg(&mut send, &ClientMsg::Chat { text: t }).await; }
-                Some(Command::State { muted, deafened }) => {
-                    let _ = write_msg(&mut send, &ClientMsg::State { muted, deafened }).await;
+                Some(Command::State { muted, deafened, away }) => {
+                    let _ = write_msg(&mut send, &ClientMsg::State { muted, deafened, away }).await;
+                }
+                Some(Command::Poke { target, text }) => {
+                    let _ = write_msg(&mut send, &ClientMsg::Poke { target, text }).await;
                 }
             },
         }

@@ -53,6 +53,10 @@ pub struct Config {
     pub noise_suppression: bool,
     /// Automatic mic level (AGC)
     pub auto_gain: bool,
+    /// Echo cancellation (useful with speakers instead of headphones)
+    pub echo_cancel: bool,
+    /// Voice activation sensitivity follows the background noise automatically
+    pub auto_threshold: bool,
     pub opus_bitrate: i32,
     pub ptt_key: String,
     /// Volume per person (by name, since ids change on every connect)
@@ -74,6 +78,8 @@ impl Default for Config {
             activation_threshold: 0.25,
             noise_suppression: true,
             auto_gain: true,
+            echo_cancel: true,
+            auto_threshold: true,
             opus_bitrate: 64_000,
             ptt_key: "F2".into(),
             user_volumes: BTreeMap::new(),
