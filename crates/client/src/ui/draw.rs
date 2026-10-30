@@ -121,7 +121,13 @@ impl App {
         if self.conn == Conn::Connected && status.is_none() {
             let ping = if self.ping > 0 { format!("{} ms", self.ping) } else { "–".into() };
             let co = if self.ping < 80 { C::Green } else if self.ping < 150 { C::Amber } else { C::Red };
-            g.segs(1, cols - 59, &[("PING ", C::D), (&ping, co), (" · TLS 1.3", C::D)]);
+            let (delay, _) = self.audio.shared.delay_estimate(self.ping);
+            let dco = if delay < 200 { C::Green } else if delay < 400 { C::Amber } else { C::Red };
+            g.segs(
+                1,
+                cols - 78,
+                &[("PING ", C::D), (&ping, co), (&format!(" · {} ", l("VERZÖGERUNG", "DELAY")), C::D), (&format!("~{delay} ms"), dco), (" · TLS 1.3", C::D)],
+            );
         }
         let set = format!("[ {} ]", l("EINSTELLUNGEN", "SETTINGS"));
         let sx = cols - 17 - set.chars().count() as i32;

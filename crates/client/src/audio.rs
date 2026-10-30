@@ -27,7 +27,11 @@ use crate::jitter::{JitterBuffer, Stats};
 
 const DENOISE_FRAME: usize = nnnoiseless::DenoiseState::FRAME_SIZE; // 480 = 10 ms
 /// Fill level of the output buffer the mixer aims for (latency vs. dropouts)
-const OUT_TARGET_MS: u32 = 60;
+const OUT_TARGET_MS: u32 = 40;
+/// Callback period requested from the sound server. Without a fixed size,
+/// PulseAudio/PipeWire choose their default – about 2 s of buffering for the
+/// microphone and the speakers – and conversations lag by seconds.
+const DEVICE_PERIOD_MS: u32 = 20;
 const SPEAKER_IDLE: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug)]
@@ -83,6 +87,9 @@ pub struct Shared {
     pub rx_level: Mutex<HashMap<u32, f32>>,
     /// Voice activation threshold actually in effect (0…1, display scale), as f32 bits
     threshold_now: AtomicU32,
+    /// Delay inside the sound server/driver, measured from the stream timestamps (ms)
+    pub in_device_ms: Arc<AtomicU32>,
+    pub out_device_ms: Arc<AtomicU32>,
 }
 
 impl Shared {
@@ -92,6 +99,25 @@ impl Shared {
 
     pub fn threshold_now(&self) -> f32 {
         f32::from_bits(self.threshold_now.load(Ordering::Relaxed))
+    }
+
+    /// Estimated mouth-to-ear delay for voices you hear, in ms:
+    /// the speaker's mic (device + one 20 ms frame), the network (about the
+    /// round-trip time: speaker → server → you), your jitter buffer, the mixer
+    /// buffer and your output device. Assumes the other side runs Tidespeak too.
+    pub fn delay_estimate(&self, rtt_ms: u32) -> (u32, [(&'static str, u32); 5]) {
+        let in_dev = self.in_device_ms.load(Ordering::Relaxed);
+        let out_dev = self.out_device_ms.load(Ordering::Relaxed);
+        let rx = self.rx.lock().unwrap();
+        let jitter = if rx.is_empty() { 40.0 } else { rx.values().map(|r| r.buffer_ms).sum::<f32>() / rx.len() as f32 };
+        let parts = [
+            ("mic", in_dev + 20),
+            ("net", rtt_ms),
+            ("jitter", jitter.round() as u32),
+            ("mix", OUT_TARGET_MS),
+            ("out", out_dev),
+        ];
+        (parts.iter().map(|p| p.1).sum(), parts)
     }
 }
 
@@ -145,6 +171,8 @@ impl Audio {
             uplink_loss: AtomicU32::new(0),
             rx_level: Mutex::new(HashMap::new()),
             threshold_now: AtomicU32::new(0f32.to_bits()),
+            in_device_ms: Arc::new(AtomicU32::new(0)),
+            out_device_ms: Arc::new(AtomicU32::new(0)),
         });
         // Was aus den Lautsprechern kommt, geht als Referenz an die Echo-Unterdrückung
         let (far_tx, far_rx) = rtrb::RingBuffer::<f32>::new(SAMPLE_RATE as usize);
@@ -301,12 +329,12 @@ fn device_thread(
         let settings = shared.settings.lock().unwrap().clone();
         let host = cpal::default_host();
 
-        let input = open_input(&host, settings.input_device.as_deref(), &mic_tx, encoder.clone());
+        let input = open_input(&host, settings.input_device.as_deref(), &mic_tx, encoder.clone(), shared.in_device_ms.clone());
         *shared.input_error.lock().unwrap() = input.as_ref().err().cloned();
         if let Err(e) = &input {
             log::warn!("Mikrofon: {e}");
         }
-        let output = open_output(&host, settings.output_device.as_deref(), &spk_tx);
+        let output = open_output(&host, settings.output_device.as_deref(), &spk_tx, shared.out_device_ms.clone());
         *shared.output_error.lock().unwrap() = output.as_ref().err().cloned();
         if let Err(e) = &output {
             log::warn!("Ausgabe: {e}");
@@ -367,6 +395,25 @@ fn pick_config(
     at48.into_iter().next().map(|r| r.with_sample_rate(SAMPLE_RATE)).or(default)
 }
 
+/// Stream configurations to try: first with a small fixed buffer (Linux sound
+/// servers), then the device default as a fallback.
+fn stream_configs(cfg: &cpal::SupportedStreamConfig) -> Vec<cpal::StreamConfig> {
+    let default = cfg.config();
+    let mut out = Vec::new();
+    if cfg!(target_os = "linux") {
+        let frames = default.sample_rate * DEVICE_PERIOD_MS / 1000;
+        if let cpal::SupportedBufferSize::Range { min, max } = cfg.buffer_size() {
+            if (*min..=*max).contains(&frames) {
+                let mut c = default.clone();
+                c.buffer_size = cpal::BufferSize::Fixed(frames);
+                out.push(c);
+            }
+        }
+    }
+    out.push(default);
+    out
+}
+
 struct InputStream(#[allow(dead_code)] cpal::Stream);
 struct OutputStream(#[allow(dead_code)] cpal::Stream);
 
@@ -375,27 +422,38 @@ fn open_input(
     name: Option<&str>,
     mic_tx: &Sender<MicSource>,
     encoder: thread::Thread,
+    lat: Arc<AtomicU32>,
 ) -> Result<InputStream, String> {
     let dev = find_device(host, name, true).ok_or(l("kein Mikrofon gefunden", "no microphone found"))?;
     let ranges = dev.supported_input_configs().map(|r| r.collect()).unwrap_or_default();
     let cfg = pick_config(ranges, dev.default_input_config().ok()).ok_or(l("Mikrofon ohne passendes Format", "microphone without a usable format"))?;
-    let stream_cfg = cfg.config();
-    let rate = stream_cfg.sample_rate;
-    let channels = (stream_cfg.channels as usize).max(1);
-    let (prod, cons) = rtrb::RingBuffer::new(rate as usize * channels);
-    let err = |e| log::warn!("Mikrofon-Stream: {e}");
-    let stream = match cfg.sample_format() {
-        SampleFormat::F32 => build_input::<f32>(&dev, stream_cfg, prod, encoder, err),
-        SampleFormat::I16 => build_input::<i16>(&dev, stream_cfg, prod, encoder, err),
-        SampleFormat::I32 => build_input::<i32>(&dev, stream_cfg, prod, encoder, err),
-        SampleFormat::U16 => build_input::<u16>(&dev, stream_cfg, prod, encoder, err),
-        f => return Err(format!("Sampleformat {f} wird nicht unterstützt")),
+    let mut last_err = String::new();
+    for stream_cfg in stream_configs(&cfg) {
+        let rate = stream_cfg.sample_rate;
+        let channels = (stream_cfg.channels as usize).max(1);
+        let buffer = stream_cfg.buffer_size;
+        let (prod, cons) = rtrb::RingBuffer::new(rate as usize * channels);
+        let err = |e| log::warn!("Mikrofon-Stream: {e}");
+        let built = match cfg.sample_format() {
+            SampleFormat::F32 => build_input::<f32>(&dev, stream_cfg, prod, encoder.clone(), lat.clone(), err),
+            SampleFormat::I16 => build_input::<i16>(&dev, stream_cfg, prod, encoder.clone(), lat.clone(), err),
+            SampleFormat::I32 => build_input::<i32>(&dev, stream_cfg, prod, encoder.clone(), lat.clone(), err),
+            SampleFormat::U16 => build_input::<u16>(&dev, stream_cfg, prod, encoder.clone(), lat.clone(), err),
+            f => return Err(format!("Sampleformat {f} wird nicht unterstützt")),
+        };
+        let stream = match built.map_err(|e| e.to_string()).and_then(|s| s.play().map(|_| s).map_err(|e| e.to_string())) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Mikrofon mit Puffer {buffer:?} nicht möglich: {e}");
+                last_err = e;
+                continue;
+            }
+        };
+        let _ = mic_tx.send(MicSource { cons, channels, rate, name: dev.to_string() });
+        log::info!("Mikrofon: {dev} ({rate} Hz, {channels} Kanäle, Puffer {buffer:?})");
+        return Ok(InputStream(stream));
     }
-    .map_err(|e| e.to_string())?;
-    stream.play().map_err(|e| e.to_string())?;
-    let _ = mic_tx.send(MicSource { cons, channels, rate, name: dev.to_string() });
-    log::info!("Mikrofon: {dev} ({rate} Hz, {channels} Kanäle)");
-    Ok(InputStream(stream))
+    Err(last_err)
 }
 
 fn build_input<T>(
@@ -403,6 +461,7 @@ fn build_input<T>(
     cfg: cpal::StreamConfig,
     mut prod: rtrb::Producer<f32>,
     encoder: thread::Thread,
+    lat: Arc<AtomicU32>,
     err: impl FnMut(cpal::Error) + Send + 'static,
 ) -> Result<cpal::Stream, cpal::Error>
 where
@@ -411,7 +470,9 @@ where
 {
     dev.build_input_stream::<T, _, _>(
         cfg,
-        move |data: &[T], _| {
+        move |data: &[T], info| {
+            let t = info.timestamp();
+            lat.store(t.callback.duration_since(t.capture).as_millis().min(10_000) as u32, Ordering::Relaxed);
             // nur kopieren – alles Weitere im Encoder-Thread
             for s in data {
                 let _ = prod.push(f32::from_sample(*s));
@@ -423,27 +484,37 @@ where
     )
 }
 
-fn open_output(host: &cpal::Host, name: Option<&str>, spk_tx: &Sender<SpeakerSink>) -> Result<OutputStream, String> {
+fn open_output(host: &cpal::Host, name: Option<&str>, spk_tx: &Sender<SpeakerSink>, lat: Arc<AtomicU32>) -> Result<OutputStream, String> {
     let dev = find_device(host, name, false).ok_or(l("keine Audioausgabe gefunden", "no audio output found"))?;
     let ranges = dev.supported_output_configs().map(|r| r.collect()).unwrap_or_default();
     let cfg = pick_config(ranges, dev.default_output_config().ok()).ok_or(l("Ausgabe ohne passendes Format", "output without a usable format"))?;
-    let stream_cfg = cfg.config();
-    let rate = stream_cfg.sample_rate;
-    let channels = (stream_cfg.channels as usize).max(1);
-    let (prod, cons) = rtrb::RingBuffer::new(rate as usize / 2);
-    let err = |e| log::warn!("Ausgabe-Stream: {e}");
-    let stream = match cfg.sample_format() {
-        SampleFormat::F32 => build_output::<f32>(&dev, stream_cfg, channels, cons, err),
-        SampleFormat::I16 => build_output::<i16>(&dev, stream_cfg, channels, cons, err),
-        SampleFormat::I32 => build_output::<i32>(&dev, stream_cfg, channels, cons, err),
-        SampleFormat::U16 => build_output::<u16>(&dev, stream_cfg, channels, cons, err),
-        f => return Err(format!("Sampleformat {f} wird nicht unterstützt")),
+    let mut last_err = String::new();
+    for stream_cfg in stream_configs(&cfg) {
+        let rate = stream_cfg.sample_rate;
+        let channels = (stream_cfg.channels as usize).max(1);
+        let buffer = stream_cfg.buffer_size;
+        let (prod, cons) = rtrb::RingBuffer::new(rate as usize / 2);
+        let err = |e| log::warn!("Ausgabe-Stream: {e}");
+        let built = match cfg.sample_format() {
+            SampleFormat::F32 => build_output::<f32>(&dev, stream_cfg, channels, cons, lat.clone(), err),
+            SampleFormat::I16 => build_output::<i16>(&dev, stream_cfg, channels, cons, lat.clone(), err),
+            SampleFormat::I32 => build_output::<i32>(&dev, stream_cfg, channels, cons, lat.clone(), err),
+            SampleFormat::U16 => build_output::<u16>(&dev, stream_cfg, channels, cons, lat.clone(), err),
+            f => return Err(format!("Sampleformat {f} wird nicht unterstützt")),
+        };
+        let stream = match built.map_err(|e| e.to_string()).and_then(|s| s.play().map(|_| s).map_err(|e| e.to_string())) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Ausgabe mit Puffer {buffer:?} nicht möglich: {e}");
+                last_err = e;
+                continue;
+            }
+        };
+        let _ = spk_tx.send(SpeakerSink { prod, rate });
+        log::info!("Ausgabe: {dev} ({rate} Hz, {channels} Kanäle, Puffer {buffer:?})");
+        return Ok(OutputStream(stream));
     }
-    .map_err(|e| e.to_string())?;
-    stream.play().map_err(|e| e.to_string())?;
-    let _ = spk_tx.send(SpeakerSink { prod, rate });
-    log::info!("Ausgabe: {dev} ({rate} Hz, {channels} Kanäle)");
-    Ok(OutputStream(stream))
+    Err(last_err)
 }
 
 fn build_output<T>(
@@ -451,6 +522,7 @@ fn build_output<T>(
     cfg: cpal::StreamConfig,
     channels: usize,
     mut cons: rtrb::Consumer<f32>,
+    lat: Arc<AtomicU32>,
     err: impl FnMut(cpal::Error) + Send + 'static,
 ) -> Result<cpal::Stream, cpal::Error>
 where
@@ -459,7 +531,9 @@ where
     // Der Ring enthält schon Gerätetakt-Samples (Mischer resampelt) – hier nur verteilen
     dev.build_output_stream::<T, _, _>(
         cfg,
-        move |data: &mut [T], _| {
+        move |data: &mut [T], info| {
+            let t = info.timestamp();
+            lat.store(t.playback.duration_since(t.callback).as_millis().min(10_000) as u32, Ordering::Relaxed);
             for frame in data.chunks_mut(channels) {
                 let v = T::from_sample(cons.pop().unwrap_or(0.0));
                 for out in frame.iter_mut() {
@@ -1006,6 +1080,21 @@ mod tests {
             bitrate: 64_000,
             ptt_key: 0,
         }
+    }
+
+    #[test]
+    fn asks_sound_server_for_small_buffers() {
+        // Ohne feste Puffergröße wählen PulseAudio/PipeWire etwa 2 s – Gespräche hinken dann hinterher
+        let cfg = cpal::SupportedStreamConfig::new(2, 48_000, cpal::SupportedBufferSize::Range { min: 1, max: 1 << 20 }, SampleFormat::F32);
+        let list = stream_configs(&cfg);
+        if cfg!(target_os = "linux") {
+            assert_eq!(list[0].buffer_size, cpal::BufferSize::Fixed(960), "20 ms bei 48 kHz");
+            assert_eq!(list.len(), 2, "Rückfall auf den Standard bleibt möglich");
+        }
+        assert_eq!(list.last().unwrap().buffer_size, cpal::BufferSize::Default);
+        // Gerät erlaubt keine 20 ms: nur der Standard
+        let tiny = cpal::SupportedStreamConfig::new(2, 48_000, cpal::SupportedBufferSize::Range { min: 2048, max: 4096 }, SampleFormat::F32);
+        assert_eq!(stream_configs(&tiny).len(), 1);
     }
 
     #[test]

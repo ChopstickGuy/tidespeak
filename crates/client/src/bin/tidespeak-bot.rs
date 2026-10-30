@@ -133,6 +133,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .collect();
             let opus = enc.encode_vec_float(&pcm, 1275).unwrap();
+            if seq == 1 {
+                // Zeitpunkt des ersten Pakets (für Latenzmessungen am Lautsprecher der Gegenseite)
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                println!("erstes Sprachpaket: {:.4}", now.as_secs_f64());
+            }
             let mut pkt = Vec::with_capacity(3 + opus.len());
             pkt.extend_from_slice(&seq.to_le_bytes());
             pkt.push(0);

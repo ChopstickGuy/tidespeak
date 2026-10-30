@@ -336,6 +336,29 @@ impl App {
                     p.kv(l("DEINE STIMME BEI DEN ANDEREN", "YOUR VOICE AT THE OTHERS"), &format!("{} %", self.tx_loss), tco);
                     p.kv("SERVER", &self.address, C::T);
                     p.r += 1;
+                    p.sec(l("VERZÖGERUNG MUND-ZU-OHR", "MOUTH-TO-EAR DELAY"));
+                    let (total, parts) = self.audio.shared.delay_estimate(self.ping);
+                    let tco = if total < 200 { C::Green } else if total < 400 { C::Amber } else { C::Red };
+                    p.kv(l("GESAMT (GESCHÄTZT)", "TOTAL (ESTIMATED)"), &format!("~{total} ms"), tco);
+                    for (key, ms) in parts {
+                        let label = match key {
+                            "mic" => l("  MIKROFON (GERÄT + 20-MS-PAKET)", "  MICROPHONE (DEVICE + 20 MS PACKET)"),
+                            "net" => l("  NETZ (SPRECHER → SERVER → DU)", "  NETWORK (SPEAKER → SERVER → YOU)"),
+                            "jitter" => l("  JITTER-PUFFER", "  JITTER BUFFER"),
+                            "mix" => l("  MISCHER", "  MIXER"),
+                            _ => l("  WIEDERGABE (GERÄT)", "  PLAYBACK (DEVICE)"),
+                        };
+                        let co = if key != "net" && key != "jitter" && ms > 150 { C::Red } else { C::D };
+                        p.kv(label, &format!("{ms} ms"), co);
+                    }
+                    p.r += 1;
+                    p.note(
+                        l(
+                            "Unter etwa 200 ms fällt man sich kaum ins Wort. Ist ein Gerätewert rot, puffert der Soundserver zu viel – Tidespeak fordert 20 ms an.",
+                            "Below about 200 ms people rarely talk over each other. If a device value is red, the sound server buffers too much – Tidespeak asks for 20 ms.",
+                        ),
+                        C::F,
+                    );
                     p.note(
                         l(
                             "Verlust bis 2 % ist unproblematisch – Tidespeak rekonstruiert fehlende Pakete. Darüber hilft meist ein LAN-Kabel statt WLAN.",

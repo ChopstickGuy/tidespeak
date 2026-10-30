@@ -5111,7 +5111,7 @@ dependencies = [
 
 [[package]]
 name = "tidespeak"
-version = "4.0.0"
+version = "4.0.1"
 dependencies = [
  "bytes",
  "chrono",
@@ -5139,7 +5139,7 @@ dependencies = [
 
 [[package]]
 name = "tidespeak-proto"
-version = "4.0.0"
+version = "4.0.1"
 dependencies = [
  "postcard",
  "serde",
@@ -5149,7 +5149,7 @@ dependencies = [
 
 [[package]]
 name = "tidespeak-server"
-version = "4.0.0"
+version = "4.0.1"
 dependencies = [
  "bytes",
  "env_logger",

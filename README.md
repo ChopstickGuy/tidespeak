@@ -142,6 +142,8 @@ IPv6 address (allow UDP 9987 for IPv6 in the router). Alternatives: Tailscale/Ze
 - **Audio interface / XLR mic:** set the gain on the interface so that normal speech lights up the green LED, not
   just barely. Automatic mic level does the rest. Tidespeak picks the input the mic is plugged into by itself.
 - **Use headphones,** so your speakers don't feed back into your mic.
+- **Delay feels high?** Look at Settings → Connection. A red device value means the sound server buffers too much;
+  everyone in the call should run 4.0.1 or newer, because the microphone buffer is on the speaker's side.
 - **Wired beats Wi-Fi.** Under Settings → Connection you can see the loss for both directions. Up to about 2 % is
   inaudible thanks to error correction.
 
@@ -159,6 +161,23 @@ IPv6 address (allow UDP 9987 for IPv6 in the router). Alternatives: Tailscale/Ze
 | **Interface** | A character grid drawn in Rust: glyphs from JetBrains Mono (rasterised with fontdue), frame, line and block characters drawn as exact shapes so they join seamlessly. Only changed cells are redrawn, and only changed tiles of the picture are handed to the window (Slint, software rendering, no browser engine). Real text fields from Slint sit exactly on the grid, so paste, selection and input methods work |
 | **Language** | English by default, German when the system is German (sys-locale), switchable at runtime |
 | **Audio devices** | cpal: PipeWire/PulseAudio and ALSA on Linux, WASAPI on Windows |
+
+**Latency:** a voice reaches the others in about **130–180 ms** over the internet (mouth to ear), well below the
+point where people start talking over each other. The header shows the current estimate next to the ping, and
+Settings → Connection breaks it down (microphone, network, jitter buffer, mixer, playback).
+
+Measured on Linux with PulseAudio, from the moment a voice packet is sent until it comes out of the speakers of the
+listener (plus the speaker's microphone buffer):
+
+| | 4.0.0 | 4.0.1 |
+|---|---|---|
+| Receiving until the speakers | ~2080 ms | ~96 ms |
+| Microphone buffer of the speaker | ~2000 ms | ~20 ms |
+| In a conversation (plus network) | over 4 s | about 130–180 ms |
+
+Up to 4.0.0, Tidespeak let PulseAudio/PipeWire pick their default buffer size, which is about 2 seconds for the
+microphone and again for the speakers. Since 4.0.1 it asks for 20 ms periods (and falls back to the default only if a
+device refuses). Hosting the server at home only adds the normal network delay, shown as ping in the header.
 
 **Lightweight:** the client uses about 50 MB of RAM. With the rolling server wave and someone talking in your channel it
 needs about 4 % of one CPU core in total – including receiving, decoding and mixing the voice. The everyday animations
@@ -212,6 +231,8 @@ send chat messages and report what it receives, which makes it useful for load t
 
 ## History
 
+- **4.0.1** – voice delay down from over 4 seconds to about 150 ms on Linux (fixed sound-server buffers), delay
+  estimate in the header and in Settings → Connection.
 - **4.0** – the ASCII interface: character-grid renderer, network view, sequences for start, connect, leave and quit,
   English/German.
 - **3.3** – network view with Slint widgets. **3.2** – call view, echo cancellation, away and pokes.
